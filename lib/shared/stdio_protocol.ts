@@ -67,6 +67,7 @@ export interface OnEndResponse {
 export interface BuildOutputFile {
   path: string
   contents: Uint8Array
+  hash: string
 }
 
 export interface PingRequest {
@@ -169,6 +170,7 @@ export interface ResolveRequest {
   resolveDir?: string
   kind?: string
   pluginData?: number
+  with?: Record<string, string>
 }
 
 export interface ResolveResponse {
@@ -193,6 +195,7 @@ export interface OnResolveRequest {
   resolveDir: string
   kind: types.ImportKind
   pluginData: number
+  with: Record<string, string>
 }
 
 export interface OnResolveResponse {
@@ -221,6 +224,7 @@ export interface OnLoadRequest {
   namespace: string
   suffix: string
   pluginData: number
+  with: Record<string, string>
 }
 
 export interface OnLoadResponse {

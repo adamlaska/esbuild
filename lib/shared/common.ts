@@ -592,12 +592,17 @@ export function createChannel(streamIn: StreamIn): StreamOut {
 
       if (typeof request.key === 'number') {
         const requestCallbacks = requestCallbacksByKey[request.key]
-        if (requestCallbacks) {
-          const callback = requestCallbacks[request.command]
-          if (callback) {
-            await callback(id, request)
-            return
-          }
+        if (!requestCallbacks) {
+          // Ignore invalid commands for old builds that no longer exist.
+          // This can happen when "context.cancel" and "context.dispose"
+          // is called while esbuild is processing many files in parallel.
+          // See https://github.com/evanw/esbuild/issues/3318 for details.
+          return
+        }
+        const callback = requestCallbacks[request.command]
+        if (callback) {
+          await callback(id, request)
+          return
         }
       }
 
@@ -795,7 +800,6 @@ export function createChannel(streamIn: StreamIn): StreamOut {
   }
 
   let formatMessages: StreamService['formatMessages'] = ({ callName, refs, messages, options, callback }) => {
-    let result = sanitizeMessages(messages, 'messages', null, '')
     if (!options) throw new Error(`Missing second argument in ${callName}() call`)
     let keys: OptionKeys = {}
     let kind = getFlag(options, keys, 'kind', mustBeString)
@@ -806,7 +810,7 @@ export function createChannel(streamIn: StreamIn): StreamOut {
     if (kind !== 'error' && kind !== 'warning') throw new Error(`Expected "kind" to be "error" or "warning" in ${callName}() call`)
     let request: protocol.FormatMsgsRequest = {
       command: 'format-msgs',
-      messages: result,
+      messages: sanitizeMessages(messages, 'messages', null, '', terminalWidth),
       isWarning: kind === 'warning',
     }
     if (color !== void 0) request.color = color
@@ -1245,6 +1249,7 @@ let handlePlugins = async (
         let resolveDir = getFlag(options, keys, 'resolveDir', mustBeString)
         let kind = getFlag(options, keys, 'kind', mustBeString)
         let pluginData = getFlag(options, keys, 'pluginData', canBeAnything)
+        let importAttributes = getFlag(options, keys, 'with', mustBeObject)
         checkForInvalidFlags(options, keys, 'in resolve() call')
 
         return new Promise((resolve, reject) => {
@@ -1261,6 +1266,7 @@ let handlePlugins = async (
           if (kind != null) request.kind = kind
           else throw new Error(`Must specify "kind" when calling "resolve"`)
           if (pluginData != null) request.pluginData = details.store(pluginData)
+          if (importAttributes != null) request.with = sanitizeStringMap(importAttributes, 'with')
 
           sendRequest<protocol.ResolveRequest, protocol.ResolveResponse>(refs, request, (error, response) => {
             if (error !== null) reject(new Error(error))
@@ -1344,6 +1350,13 @@ let handlePlugins = async (
   }
 
   requestCallbacks['on-start'] = async (id, request: protocol.OnStartRequest) => {
+    // Reset the "pluginData" map before each new build to avoid a memory leak.
+    // This is done before each new build begins instead of after each build ends
+    // because I believe the current API doesn't restrict when you can call
+    // "resolve" and there may be some uses of it that call it around when the
+    // build ends, and we don't want to accidentally break those use cases.
+    details.clear()
+
     let response: protocol.OnStartResponse = { errors: [], warnings: [] }
     await Promise.all(onStartCallbacks.map(async ({ name, callback, note }) => {
       try {
@@ -1356,8 +1369,8 @@ let handlePlugins = async (
           let warnings = getFlag(result, keys, 'warnings', mustBeArray)
           checkForInvalidFlags(result, keys, `from onStart() callback in plugin ${quote(name)}`)
 
-          if (errors != null) response.errors!.push(...sanitizeMessages(errors, 'errors', details, name))
-          if (warnings != null) response.warnings!.push(...sanitizeMessages(warnings, 'warnings', details, name))
+          if (errors != null) response.errors!.push(...sanitizeMessages(errors, 'errors', details, name, undefined))
+          if (warnings != null) response.warnings!.push(...sanitizeMessages(warnings, 'warnings', details, name, undefined))
         }
       } catch (e) {
         response.errors!.push(extractErrorMessageV8(e, streamIn, details, note && note(), name))
@@ -1378,6 +1391,7 @@ let handlePlugins = async (
           resolveDir: request.resolveDir,
           kind: request.kind,
           pluginData: details.load(request.pluginData),
+          with: request.with,
         })
 
         if (result != null) {
@@ -1404,8 +1418,8 @@ let handlePlugins = async (
           if (external != null) response.external = external
           if (sideEffects != null) response.sideEffects = sideEffects
           if (pluginData != null) response.pluginData = details.store(pluginData)
-          if (errors != null) response.errors = sanitizeMessages(errors, 'errors', details, name)
-          if (warnings != null) response.warnings = sanitizeMessages(warnings, 'warnings', details, name)
+          if (errors != null) response.errors = sanitizeMessages(errors, 'errors', details, name, undefined)
+          if (warnings != null) response.warnings = sanitizeMessages(warnings, 'warnings', details, name, undefined)
           if (watchFiles != null) response.watchFiles = sanitizeStringArray(watchFiles, 'watchFiles')
           if (watchDirs != null) response.watchDirs = sanitizeStringArray(watchDirs, 'watchDirs')
           break
@@ -1428,6 +1442,7 @@ let handlePlugins = async (
           namespace: request.namespace,
           suffix: request.suffix,
           pluginData: details.load(request.pluginData),
+          with: request.with,
         })
 
         if (result != null) {
@@ -1451,8 +1466,8 @@ let handlePlugins = async (
           if (resolveDir != null) response.resolveDir = resolveDir
           if (pluginData != null) response.pluginData = details.store(pluginData)
           if (loader != null) response.loader = loader
-          if (errors != null) response.errors = sanitizeMessages(errors, 'errors', details, name)
-          if (warnings != null) response.warnings = sanitizeMessages(warnings, 'warnings', details, name)
+          if (errors != null) response.errors = sanitizeMessages(errors, 'errors', details, name, undefined)
+          if (warnings != null) response.warnings = sanitizeMessages(warnings, 'warnings', details, name, undefined)
           if (watchFiles != null) response.watchFiles = sanitizeStringArray(watchFiles, 'watchFiles')
           if (watchDirs != null) response.watchDirs = sanitizeStringArray(watchDirs, 'watchDirs')
           break
@@ -1487,8 +1502,8 @@ let handlePlugins = async (
               let warnings = getFlag(value, keys, 'warnings', mustBeArray)
               checkForInvalidFlags(value, keys, `from onEnd() callback in plugin ${quote(name)}`)
 
-              if (errors != null) newErrors = sanitizeMessages(errors, 'errors', details, name)
-              if (warnings != null) newWarnings = sanitizeMessages(warnings, 'warnings', details, name)
+              if (errors != null) newErrors = sanitizeMessages(errors, 'errors', details, name, undefined)
+              if (warnings != null) newWarnings = sanitizeMessages(warnings, 'warnings', details, name, undefined)
             }
           } catch (e) {
             newErrors = [extractErrorMessageV8(e, streamIn, details, note && note(), name)]
@@ -1540,6 +1555,7 @@ let handlePlugins = async (
 // even if the JavaScript objects aren't serializable. And we also avoid
 // the overhead of serializing large JavaScript objects.
 interface ObjectStash {
+  clear(): void
   load(id: number): any
   store(value: any): number
 }
@@ -1548,6 +1564,9 @@ function createObjectStash(): ObjectStash {
   const map = new Map<number, any>()
   let nextID = 0
   return {
+    clear() {
+      map.clear()
+    },
     load(id) {
       return map.get(id)
     },
@@ -1653,7 +1672,7 @@ function parseStackLinesV8(streamIn: StreamIn, lines: string[], ident: string): 
 
 function failureErrorWithLog(text: string, errors: types.Message[], warnings: types.Message[]): types.BuildFailure {
   let limit = 5
-  let summary = errors.length < 1 ? '' : ` with ${errors.length} error${errors.length < 2 ? '' : 's'}:` +
+  text += errors.length < 1 ? '' : ` with ${errors.length} error${errors.length < 2 ? '' : 's'}:` +
     errors.slice(0, limit + 1).map((e, i) => {
       if (i === limit) return '\n...'
       if (!e.location) return `\nerror: ${e.text}`
@@ -1661,9 +1680,26 @@ function failureErrorWithLog(text: string, errors: types.Message[], warnings: ty
       let pluginText = e.pluginName ? `[plugin: ${e.pluginName}] ` : ''
       return `\n${file}:${line}:${column}: ERROR: ${pluginText}${e.text}`
     }).join('')
-  let error: any = new Error(`${text}${summary}`)
-  error.errors = errors
-  error.warnings = warnings
+  let error: any = new Error(text)
+
+  // Use a getter instead of a plain property so that when the error is thrown
+  // without being caught and the node process exits, the error objects aren't
+  // printed. The error objects are pretty big and not helpful because a) esbuild
+  // already prints errors to stderr by default and b) the error summary already
+  // has a more helpful abbreviated form of the error messages.
+  for (const [key, value] of [['errors', errors], ['warnings', warnings]] as const) {
+    Object.defineProperty(error, key, {
+      configurable: true,
+      enumerable: true,
+      get: () => value,
+      set: value => Object.defineProperty(error, key, {
+        configurable: true,
+        enumerable: true,
+        value,
+      }),
+    })
+  }
+
   return error
 }
 
@@ -1674,7 +1710,7 @@ function replaceDetailsInMessages(messages: types.Message[], stash: ObjectStash)
   return messages
 }
 
-function sanitizeLocation(location: types.PartialMessage['location'], where: string): types.Message['location'] {
+function sanitizeLocation(location: types.PartialMessage['location'], where: string, terminalWidth: number | undefined): types.Message['location'] {
   if (location == null) return null
 
   let keys: OptionKeys = {}
@@ -1687,6 +1723,32 @@ function sanitizeLocation(location: types.PartialMessage['location'], where: str
   let suggestion = getFlag(location, keys, 'suggestion', mustBeString)
   checkForInvalidFlags(location, keys, where)
 
+  // Performance hack: Some people pass enormous minified files as the line
+  // text with a column near the beginning of the line and then complain
+  // when this function is slow. The slowness comes from serializing a huge
+  // string. But the vast majority of that string is unnecessary. Try to
+  // detect when this is the case and trim the string before serialization
+  // to avoid the performance hit. See: https://github.com/evanw/esbuild/issues/3467
+  if (lineText) {
+    // Try to conservatively guess the maximum amount of relevant text
+    const relevantASCII = lineText.slice(0,
+      (column && column > 0 ? column : 0) +
+      (length && length > 0 ? length : 0) +
+      (terminalWidth && terminalWidth > 0 ? terminalWidth : 80))
+
+    // Make sure it's ASCII (so the byte-oriented column and length values
+    // are correct) and that there are no newlines (so that our logging code
+    // doesn't look at the end of the string)
+    if (!/[\x7F-\uFFFF]/.test(relevantASCII) && !/\n/.test(lineText)) {
+      lineText = relevantASCII
+    }
+  }
+
+  // Note: We could technically make this even faster by maintaining two copies
+  // of this code, one in Go and one in TypeScript. But I'm not going to do that.
+  // The point of this function is to call into the real Go code to get what it
+  // does. If someone wants a JS version, they can port it themselves.
+
   return {
     file: file || '',
     namespace: namespace || '',
@@ -1698,7 +1760,13 @@ function sanitizeLocation(location: types.PartialMessage['location'], where: str
   }
 }
 
-function sanitizeMessages(messages: types.PartialMessage[], property: string, stash: ObjectStash | null, fallbackPluginName: string): types.Message[] {
+function sanitizeMessages(
+  messages: types.PartialMessage[],
+  property: string,
+  stash: ObjectStash | null,
+  fallbackPluginName: string,
+  terminalWidth: number | undefined,
+): types.Message[] {
   let messagesClone: types.Message[] = []
   let index = 0
 
@@ -1722,7 +1790,7 @@ function sanitizeMessages(messages: types.PartialMessage[], property: string, st
         checkForInvalidFlags(note, noteKeys, where)
         notesClone.push({
           text: noteText || '',
-          location: sanitizeLocation(noteLocation, where),
+          location: sanitizeLocation(noteLocation, where, terminalWidth),
         })
       }
     }
@@ -1731,7 +1799,7 @@ function sanitizeMessages(messages: types.PartialMessage[], property: string, st
       id: id || '',
       pluginName: pluginName || fallbackPluginName,
       text: text || '',
-      location: sanitizeLocation(location, where),
+      location: sanitizeLocation(location, where, terminalWidth),
       notes: notesClone,
       detail: stash ? stash.store(detail) : -1,
     })
@@ -1750,13 +1818,24 @@ function sanitizeStringArray(values: any[], property: string): string[] {
   return result
 }
 
-function convertOutputFiles({ path, contents }: protocol.BuildOutputFile): types.OutputFile {
+function sanitizeStringMap(map: Record<string, any>, property: string): Record<string, string> {
+  const result: Record<string, string> = Object.create(null)
+  for (const key in map) {
+    const value = map[key]
+    if (typeof value !== 'string') throw new Error(`key ${quote(key)} in object ${quote(property)} must be a string`)
+    result[key] = value
+  }
+  return result
+}
+
+function convertOutputFiles({ path, contents, hash }: protocol.BuildOutputFile): types.OutputFile {
   // The text is lazily-generated for performance reasons. If no one asks for
   // it, then it never needs to be generated.
   let text: string | null = null
   return {
     path,
     contents,
+    hash,
     get text() {
       // People want to be able to set "contents" and have esbuild automatically
       // derive "text" for them, so grab the contents off of this object instead

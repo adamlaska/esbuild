@@ -154,7 +154,7 @@ func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicol
 		p.print("@charset ")
 
 		// It's not valid to print the string with single quotes
-		p.printQuotedWithQuote(r.Encoding, '"')
+		p.printQuotedWithQuote(r.Encoding, '"', 0)
 		p.print(";")
 
 	case *css_ast.RAtImport:
@@ -163,9 +163,36 @@ func (p *printer) printRule(rule css_ast.Rule, indent int32, omitTrailingSemicol
 		} else {
 			p.print("@import ")
 		}
-		p.printQuoted(p.importRecords[r.ImportRecordIndex].Path.Text)
+		record := p.importRecords[r.ImportRecordIndex]
+		var flags printQuotedFlags
+		if record.Flags.Has(ast.ContainsUniqueKey) {
+			flags |= printQuotedNoWrap
+		}
+		p.printQuoted(record.Path.Text, flags)
 		p.recordImportPathForMetafile(r.ImportRecordIndex)
-		p.printTokens(r.ImportConditions, printTokensOpts{})
+		if conditions := r.ImportConditions; conditions != nil {
+			space := !p.options.MinifyWhitespace
+			if len(conditions.Layers) > 0 {
+				if space {
+					p.print(" ")
+				}
+				p.printTokens(conditions.Layers, printTokensOpts{})
+				space = true
+			}
+			if len(conditions.Supports) > 0 {
+				if space {
+					p.print(" ")
+				}
+				p.printTokens(conditions.Supports, printTokensOpts{})
+				space = true
+			}
+			if len(conditions.Media) > 0 {
+				if space {
+					p.print(" ")
+				}
+				p.printTokens(conditions.Media, printTokensOpts{})
+			}
+		}
 		p.print(";")
 
 	case *css_ast.RAtKeyframes:
@@ -449,7 +476,7 @@ func (p *printer) printCompoundSelector(sel css_ast.CompoundSelector, isFirst bo
 		}
 
 		if p.options.AddSourceMappings {
-			p.builder.AddSourceMapping(ss.Loc, "", p.css)
+			p.builder.AddSourceMapping(ss.Range.Loc, "", p.css)
 		}
 
 		switch s := ss.Data.(type) {
@@ -485,7 +512,7 @@ func (p *printer) printCompoundSelector(sel css_ast.CompoundSelector, isFirst bo
 				if printAsIdent {
 					p.printIdent(s.MatcherValue, identNormal, canDiscardWhitespaceAfter)
 				} else {
-					p.printQuoted(s.MatcherValue)
+					p.printQuoted(s.MatcherValue, 0)
 				}
 			}
 			if s.MatcherModifier != 0 {
@@ -542,7 +569,7 @@ func (p *printer) printNthIndex(index css_ast.NthIndex) {
 func (p *printer) printNamespacedName(nsName css_ast.NamespacedName, whitespace trailingWhitespace) {
 	if prefix := nsName.NamespacePrefix; prefix != nil {
 		if p.options.AddSourceMappings {
-			p.builder.AddSourceMapping(prefix.Loc, "", p.css)
+			p.builder.AddSourceMapping(prefix.Range.Loc, "", p.css)
 		}
 
 		switch prefix.Kind {
@@ -558,7 +585,7 @@ func (p *printer) printNamespacedName(nsName css_ast.NamespacedName, whitespace 
 	}
 
 	if p.options.AddSourceMappings {
-		p.builder.AddSourceMapping(nsName.Name.Loc, "", p.css)
+		p.builder.AddSourceMapping(nsName.Name.Range.Loc, "", p.css)
 	}
 
 	switch nsName.Name.Kind {
@@ -633,8 +660,14 @@ func bestQuoteCharForString(text string, forURL bool) byte {
 	return '"'
 }
 
-func (p *printer) printQuoted(text string) {
-	p.printQuotedWithQuote(text, bestQuoteCharForString(text, false))
+type printQuotedFlags uint8
+
+const (
+	printQuotedNoWrap printQuotedFlags = 1 << iota
+)
+
+func (p *printer) printQuoted(text string, flags printQuotedFlags) {
+	p.printQuotedWithQuote(text, bestQuoteCharForString(text, false), flags)
 }
 
 type escapeKind uint8
@@ -685,7 +718,7 @@ func (p *printer) printWithEscape(c rune, escape escapeKind, remainingText strin
 }
 
 // Note: This function is hot in profiles
-func (p *printer) printQuotedWithQuote(text string, quote byte) {
+func (p *printer) printQuotedWithQuote(text string, quote byte, flags printQuotedFlags) {
 	if quote != quoteForURL {
 		p.css = append(p.css, quote)
 	}
@@ -697,7 +730,7 @@ func (p *printer) printQuotedWithQuote(text string, quote byte) {
 	// Only compute the line length if necessary
 	var startLineLength int
 	wrapLongLines := false
-	if p.options.LineLimit > 0 && quote != quoteForURL {
+	if p.options.LineLimit > 0 && quote != quoteForURL && (flags&printQuotedNoWrap) == 0 {
 		startLineLength = p.currentLineLength()
 		if startLineLength > p.options.LineLimit {
 			startLineLength = p.options.LineLimit
@@ -909,32 +942,74 @@ func (p *printer) printIndent(indent int32) {
 }
 
 type printTokensOpts struct {
-	indent        int32
-	isDeclaration bool
+	indent               int32
+	multiLineCommaPeriod uint8
+	isDeclaration        bool
+}
+
+func functionMultiLineCommaPeriod(token css_ast.Token) uint8 {
+	if token.Kind == css_lexer.TFunction {
+		commaCount := 0
+		for _, t := range *token.Children {
+			if t.Kind == css_lexer.TComma {
+				commaCount++
+			}
+		}
+
+		switch strings.ToLower(token.Text) {
+		case "linear-gradient", "radial-gradient", "conic-gradient",
+			"repeating-linear-gradient", "repeating-radial-gradient", "repeating-conic-gradient":
+			if commaCount >= 2 {
+				return 1
+			}
+
+		case "matrix":
+			if commaCount == 5 {
+				return 2
+			}
+
+		case "matrix3d":
+			if commaCount == 15 {
+				return 4
+			}
+		}
+	}
+	return 0
 }
 
 func (p *printer) printTokens(tokens []css_ast.Token, opts printTokensOpts) bool {
 	hasWhitespaceAfter := len(tokens) > 0 && (tokens[0].Whitespace&css_ast.WhitespaceBefore) != 0
 
 	// Pretty-print long comma-separated declarations of 3 or more items
-	isMultiLineValue := false
+	commaPeriod := int(opts.multiLineCommaPeriod)
 	if !p.options.MinifyWhitespace && opts.isDeclaration {
 		commaCount := 0
 		for _, t := range tokens {
 			if t.Kind == css_lexer.TComma {
 				commaCount++
+				if commaCount >= 2 {
+					commaPeriod = 1
+					break
+				}
+			}
+			if t.Kind == css_lexer.TFunction && functionMultiLineCommaPeriod(t) > 0 {
+				commaPeriod = 1
+				break
 			}
 		}
-		isMultiLineValue = commaCount >= 2
 	}
 
+	commaCount := 0
 	for i, t := range tokens {
+		if t.Kind == css_lexer.TComma {
+			commaCount++
+		}
 		if t.Kind == css_lexer.TWhitespace {
 			hasWhitespaceAfter = true
 			continue
 		}
 		if hasWhitespaceAfter {
-			if isMultiLineValue && (i == 0 || tokens[i-1].Kind == css_lexer.TComma) {
+			if commaPeriod > 0 && (i == 0 || (tokens[i-1].Kind == css_lexer.TComma && commaCount%commaPeriod == 0)) {
 				p.print("\n")
 				p.printIndent(opts.indent + 1)
 			} else if p.options.LineLimit <= 0 || !p.printNewlinePastLineLimit(opts.indent+1) {
@@ -983,16 +1058,27 @@ func (p *printer) printTokens(tokens []css_ast.Token, opts printTokensOpts) bool
 			p.printIdent(t.Text, identHash, whitespace)
 
 		case css_lexer.TString:
-			p.printQuoted(t.Text)
+			p.printQuoted(t.Text, 0)
 
 		case css_lexer.TURL:
-			text := p.importRecords[t.PayloadIndex].Path.Text
+			record := p.importRecords[t.PayloadIndex]
+			text := record.Path.Text
 			tryToAvoidQuote := true
-			if p.options.LineLimit > 0 && p.currentLineLength()+len(text) >= p.options.LineLimit {
+			var flags printQuotedFlags
+			if record.Flags.Has(ast.ContainsUniqueKey) {
+				flags |= printQuotedNoWrap
+
+				// If the caller will be substituting a path here later using string
+				// substitution, then we can't be sure that it will form a valid URL
+				// token when unquoted (e.g. it may contain spaces). So we need to
+				// quote the unique key here just in case. For more info see this
+				// issue: https://github.com/evanw/esbuild/issues/3410
+				tryToAvoidQuote = false
+			} else if p.options.LineLimit > 0 && p.currentLineLength()+len(text) >= p.options.LineLimit {
 				tryToAvoidQuote = false
 			}
 			p.print("url(")
-			p.printQuotedWithQuote(text, bestQuoteCharForString(text, tryToAvoidQuote))
+			p.printQuotedWithQuote(text, bestQuoteCharForString(text, tryToAvoidQuote), flags)
 			p.print(")")
 			p.recordImportPathForMetafile(t.PayloadIndex)
 
@@ -1010,7 +1096,28 @@ func (p *printer) printTokens(tokens []css_ast.Token, opts printTokensOpts) bool
 		}
 
 		if t.Children != nil {
-			p.printTokens(*t.Children, printTokensOpts{indent: opts.indent})
+			childCommaPeriod := uint8(0)
+
+			if commaPeriod > 0 && opts.isDeclaration {
+				childCommaPeriod = functionMultiLineCommaPeriod(t)
+			}
+
+			if childCommaPeriod > 0 {
+				opts.indent++
+				if !p.options.MinifyWhitespace {
+					p.print("\n")
+					p.printIndent(opts.indent + 1)
+				}
+			}
+
+			p.printTokens(*t.Children, printTokensOpts{
+				indent:               opts.indent,
+				multiLineCommaPeriod: childCommaPeriod,
+			})
+
+			if childCommaPeriod > 0 {
+				opts.indent--
+			}
 
 			switch t.Kind {
 			case css_lexer.TFunction:

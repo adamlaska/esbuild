@@ -5,6 +5,8 @@ package api
 
 import (
 	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io/ioutil"
@@ -214,6 +216,17 @@ func validateASCIIOnly(value Charset) bool {
 	}
 }
 
+func validateExternalPackages(value Packages) bool {
+	switch value {
+	case PackagesDefault, PackagesBundle:
+		return false
+	case PackagesExternal:
+		return true
+	default:
+		panic("Invalid packages")
+	}
+}
+
 func validateTreeShaking(value TreeShaking, bundle bool, format Format) bool {
 	switch value {
 	case TreeShakingDefault:
@@ -274,55 +287,39 @@ func validateLoader(value Loader) config.Loader {
 	}
 }
 
-func validateEngine(value EngineName) compat.Engine {
-	switch value {
-	case EngineChrome:
-		return compat.Chrome
-	case EngineEdge:
-		return compat.Edge
-	case EngineFirefox:
-		return compat.Firefox
-	case EngineIOS:
-		return compat.IOS
-	case EngineNode:
-		return compat.Node
-	case EngineSafari:
-		return compat.Safari
-	default:
-		panic("Invalid loader")
-	}
-}
-
-var versionRegex = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?$`)
-var preReleaseVersionRegex = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?-`)
+var versionRegex = regexp.MustCompile(`^([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?(-[A-Za-z0-9]+(?:\.[A-Za-z0-9]+)*)?$`)
 
 func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.JSFeature, compat.CSSFeature, map[css_ast.D]compat.CSSPrefix, string) {
 	if target == DefaultTarget && len(engines) == 0 {
 		return 0, 0, nil, ""
 	}
 
-	constraints := make(map[compat.Engine][]int)
+	constraints := make(map[compat.Engine]compat.Semver)
 	targets := make([]string, 0, 1+len(engines))
 
 	switch target {
 	case ES5:
-		constraints[compat.ES] = []int{5}
+		constraints[compat.ES] = compat.Semver{Parts: []int{5}}
 	case ES2015:
-		constraints[compat.ES] = []int{2015}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2015}}
 	case ES2016:
-		constraints[compat.ES] = []int{2016}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2016}}
 	case ES2017:
-		constraints[compat.ES] = []int{2017}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2017}}
 	case ES2018:
-		constraints[compat.ES] = []int{2018}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2018}}
 	case ES2019:
-		constraints[compat.ES] = []int{2019}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2019}}
 	case ES2020:
-		constraints[compat.ES] = []int{2020}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2020}}
 	case ES2021:
-		constraints[compat.ES] = []int{2021}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2021}}
 	case ES2022:
-		constraints[compat.ES] = []int{2022}
+		constraints[compat.ES] = compat.Semver{Parts: []int{2022}}
+	case ES2023:
+		constraints[compat.ES] = compat.Semver{Parts: []int{2023}}
+	case ES2024:
+		constraints[compat.ES] = compat.Semver{Parts: []int{2024}}
 	case ESNext, DefaultTarget:
 	default:
 		panic("Invalid target")
@@ -331,41 +328,29 @@ func validateFeatures(log logger.Log, target Target, engines []Engine) (compat.J
 	for _, engine := range engines {
 		if match := versionRegex.FindStringSubmatch(engine.Version); match != nil {
 			if major, err := strconv.Atoi(match[1]); err == nil {
-				version := []int{major}
+				parts := []int{major}
 				if minor, err := strconv.Atoi(match[2]); err == nil {
-					version = append(version, minor)
+					parts = append(parts, minor)
+					if patch, err := strconv.Atoi(match[3]); err == nil {
+						parts = append(parts, patch)
+					}
 				}
-				if patch, err := strconv.Atoi(match[3]); err == nil {
-					version = append(version, patch)
+				constraints[convertEngineName(engine.Name)] = compat.Semver{
+					Parts:      parts,
+					PreRelease: match[4],
 				}
-				constraints[convertEngineName(engine.Name)] = version
 				continue
 			}
 		}
 
 		text := "All version numbers passed to esbuild must be in the format \"X\", \"X.Y\", or \"X.Y.Z\" where X, Y, and Z are non-negative integers."
 
-		// Our internal version-to-feature database only includes version triples.
-		// We don't have any data on pre-release versions, so we don't accept them.
-		if preReleaseVersionRegex.MatchString(engine.Version) {
-			text += " Pre-release versions are not supported and cannot be used."
-		}
-
 		log.AddErrorWithNotes(nil, logger.Range{}, fmt.Sprintf("Invalid version: %q", engine.Version),
 			[]logger.MsgData{{Text: text}})
 	}
 
 	for engine, version := range constraints {
-		var text string
-		switch len(version) {
-		case 1:
-			text = fmt.Sprintf("%s%d", engine.String(), version[0])
-		case 2:
-			text = fmt.Sprintf("%s%d.%d", engine.String(), version[0], version[1])
-		case 3:
-			text = fmt.Sprintf("%s%d.%d.%d", engine.String(), version[0], version[1], version[2])
-		}
-		targets = append(targets, text)
+		targets = append(targets, engine.String()+version.String())
 	}
 	if target == ESNext {
 		targets = append(targets, "esnext")
@@ -401,11 +386,11 @@ func validateSupported(log logger.Log, supported map[string]bool) (
 	return
 }
 
-func validateGlobalName(log logger.Log, text string) []string {
+func validateGlobalName(log logger.Log, text string, path string) []string {
 	if text != "" {
 		source := logger.Source{
-			KeyPath:    logger.Path{Text: "(global path)"},
-			PrettyPath: "(global name)",
+			KeyPath:    logger.Path{Text: path},
+			PrettyPath: path,
 			Contents:   text,
 		}
 
@@ -465,37 +450,6 @@ func validateExternals(log logger.Log, fs fs.FS, paths []string) config.External
 	return result
 }
 
-func esmParsePackageName(packageSpecifier string) (packageName string, packageSubpath string, ok bool) {
-	if packageSpecifier == "" {
-		return
-	}
-
-	slash := strings.IndexByte(packageSpecifier, '/')
-	if !strings.HasPrefix(packageSpecifier, "@") {
-		if slash == -1 {
-			slash = len(packageSpecifier)
-		}
-		packageName = packageSpecifier[:slash]
-	} else {
-		if slash == -1 {
-			return
-		}
-		slash2 := strings.IndexByte(packageSpecifier[slash+1:], '/')
-		if slash2 == -1 {
-			slash2 = len(packageSpecifier[slash+1:])
-		}
-		packageName = packageSpecifier[:slash+1+slash2]
-	}
-
-	if strings.HasPrefix(packageName, ".") || strings.ContainsAny(packageName, "\\%") {
-		return
-	}
-
-	packageSubpath = "." + packageSpecifier[len(packageName):]
-	ok = true
-	return
-}
-
 func validateAlias(log logger.Log, fs fs.FS, alias map[string]string) map[string]string {
 	valid := make(map[string]string, len(alias))
 
@@ -551,13 +505,11 @@ func validateResolveExtensions(log logger.Log, order []string) []string {
 
 func validateLoaders(log logger.Log, loaders map[string]Loader) map[string]config.Loader {
 	result := bundler.DefaultExtensionToLoaderMap()
-	if loaders != nil {
-		for ext, loader := range loaders {
-			if ext != "" && !isValidExtension(ext) {
-				log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid file extension: %q", ext))
-			}
-			result[ext] = validateLoader(loader)
+	for ext, loader := range loaders {
+		if ext != "" && !isValidExtension(ext) {
+			log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid file extension: %q", ext))
 		}
+		result[ext] = validateLoader(loader)
 	}
 	return result
 }
@@ -572,6 +524,18 @@ func validateJSXExpr(log logger.Log, text string, name string) config.DefineExpr
 	return config.DefineExpr{}
 }
 
+// This returns an arbitrary but unique key for each unique array of strings
+func mapKeyForDefine(parts []string) string {
+	var sb strings.Builder
+	var n [4]byte
+	for _, part := range parts {
+		binary.LittleEndian.PutUint32(n[:], uint32(len(part)))
+		sb.Write(n[:])
+		sb.WriteString(part)
+	}
+	return sb.String()
+}
+
 func validateDefines(
 	log logger.Log,
 	defines map[string]string,
@@ -581,32 +545,36 @@ func validateDefines(
 	minify bool,
 	drop Drop,
 ) (*config.ProcessedDefines, []config.InjectedDefine) {
-	rawDefines := make(map[string]config.DefineData)
-	var valueToInject map[string]config.InjectedDefine
-	var definesToInject []string
+	// Sort injected defines for determinism, since the imports will be injected
+	// into every file in the order that we return them from this function
+	sortedKeys := make([]string, 0, len(defines))
+	for key := range defines {
+		sortedKeys = append(sortedKeys, key)
+	}
+	sort.Strings(sortedKeys)
 
-	for key, value := range defines {
-		// The key must be a dot-separated identifier list
-		for _, part := range strings.Split(key, ".") {
-			if !js_ast.IsIdentifier(part) {
-				if part == key {
-					log.AddError(nil, logger.Range{}, fmt.Sprintf("The define key %q must be a valid identifier", key))
-				} else {
-					log.AddError(nil, logger.Range{}, fmt.Sprintf("The define key %q contains invalid identifier %q", key, part))
-				}
-				continue
-			}
+	rawDefines := make(map[string]config.DefineData)
+	nodeEnvParts := []string{"process", "env", "NODE_ENV"}
+	nodeEnvMapKey := mapKeyForDefine(nodeEnvParts)
+	var injectedDefines []config.InjectedDefine
+
+	for _, key := range sortedKeys {
+		value := defines[key]
+		keyParts := validateGlobalName(log, key, "(define name)")
+		if keyParts == nil {
+			continue
 		}
+		mapKey := mapKeyForDefine(keyParts)
 
 		// Parse the value
 		defineExpr, injectExpr := js_parser.ParseDefineExprOrJSON(value)
 
 		// Define simple expressions
 		if defineExpr.Constant != nil || len(defineExpr.Parts) > 0 {
-			rawDefines[key] = config.DefineData{DefineExpr: &defineExpr}
+			rawDefines[mapKey] = config.DefineData{KeyParts: keyParts, DefineExpr: &defineExpr}
 
 			// Try to be helpful for common mistakes
-			if len(defineExpr.Parts) == 1 && key == "process.env.NODE_ENV" {
+			if len(defineExpr.Parts) == 1 && mapKey == nodeEnvMapKey {
 				data := logger.MsgData{
 					Text: fmt.Sprintf("%q is defined as an identifier instead of a string (surround %q with quotes to get a string)", key, value),
 				}
@@ -654,32 +622,18 @@ func validateDefines(
 
 		// Inject complex expressions
 		if injectExpr != nil {
-			definesToInject = append(definesToInject, key)
-			if valueToInject == nil {
-				valueToInject = make(map[string]config.InjectedDefine)
-			}
-			valueToInject[key] = config.InjectedDefine{
+			index := ast.MakeIndex32(uint32(len(injectedDefines)))
+			injectedDefines = append(injectedDefines, config.InjectedDefine{
 				Source: logger.Source{Contents: value},
 				Data:   injectExpr,
 				Name:   key,
-			}
+			})
+			rawDefines[mapKey] = config.DefineData{KeyParts: keyParts, DefineExpr: &config.DefineExpr{InjectedDefineIndex: index}}
 			continue
 		}
 
 		// Anything else is unsupported
 		log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid define value (must be an entity name or valid JSON syntax): %s", value))
-	}
-
-	// Sort injected defines for determinism, since the imports will be injected
-	// into every file in the order that we return them from this function
-	var injectedDefines []config.InjectedDefine
-	if len(definesToInject) > 0 {
-		injectedDefines = make([]config.InjectedDefine, len(definesToInject))
-		sort.Strings(definesToInject)
-		for i, key := range definesToInject {
-			injectedDefines[i] = valueToInject[key]
-			rawDefines[key] = config.DefineData{DefineExpr: &config.DefineExpr{InjectedDefineIndex: ast.MakeIndex32(uint32(i))}}
-		}
 	}
 
 	// If we're bundling for the browser, add a special-cased define for
@@ -689,16 +643,16 @@ func validateDefines(
 	// is only done if it's not already defined so that you can override it if
 	// necessary.
 	if isBuildAPI && platform == config.PlatformBrowser {
-		if _, process := rawDefines["process"]; !process {
-			if _, processEnv := rawDefines["process.env"]; !processEnv {
-				if _, processEnvNodeEnv := rawDefines["process.env.NODE_ENV"]; !processEnvNodeEnv {
+		if _, process := rawDefines[mapKeyForDefine([]string{"process"})]; !process {
+			if _, processEnv := rawDefines[mapKeyForDefine([]string{"process.env"})]; !processEnv {
+				if _, processEnvNodeEnv := rawDefines[nodeEnvMapKey]; !processEnvNodeEnv {
 					var value []uint16
 					if minify {
 						value = helpers.StringToUTF16("production")
 					} else {
 						value = helpers.StringToUTF16("development")
 					}
-					rawDefines["process.env.NODE_ENV"] = config.DefineData{DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: value}}}
+					rawDefines[nodeEnvMapKey] = config.DefineData{KeyParts: nodeEnvParts, DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: value}}}
 				}
 			}
 		}
@@ -706,29 +660,35 @@ func validateDefines(
 
 	// If we're dropping all console API calls, replace each one with undefined
 	if (drop & DropConsole) != 0 {
-		define := rawDefines["console"]
-		define.MethodCallsMustBeReplacedWithUndefined = true
-		rawDefines["console"] = define
+		consoleParts := []string{"console"}
+		consoleMapKey := mapKeyForDefine(consoleParts)
+		define := rawDefines[consoleMapKey]
+		define.KeyParts = consoleParts
+		define.Flags |= config.MethodCallsMustBeReplacedWithUndefined
+		rawDefines[consoleMapKey] = define
 	}
 
 	for _, key := range pureFns {
-		// The key must be a dot-separated identifier list
-		for _, part := range strings.Split(key, ".") {
-			if !js_ast.IsIdentifier(part) {
-				log.AddError(nil, logger.Range{}, fmt.Sprintf("Invalid pure function: %q", key))
-				continue
-			}
+		keyParts := validateGlobalName(log, key, "(pure name)")
+		if keyParts == nil {
+			continue
 		}
+		mapKey := mapKeyForDefine(keyParts)
 
 		// Merge with any previously-specified defines
-		define := rawDefines[key]
-		define.CallCanBeUnwrappedIfUnused = true
-		rawDefines[key] = define
+		define := rawDefines[mapKey]
+		define.KeyParts = keyParts
+		define.Flags |= config.CallCanBeUnwrappedIfUnused
+		rawDefines[mapKey] = define
 	}
 
 	// Processing defines is expensive. Process them once here so the same object
 	// can be shared between all parsers we create using these arguments.
-	processed := config.ProcessDefines(rawDefines)
+	definesArray := make([]config.DefineData, 0, len(rawDefines))
+	for _, define := range rawDefines {
+		definesArray = append(definesArray, define)
+	}
+	processed := config.ProcessDefines(definesArray)
 	return &processed, injectedDefines
 }
 
@@ -780,6 +740,15 @@ func validateBannerOrFooter(log logger.Log, name string, values map[string]strin
 		}
 	}
 	return
+}
+
+func validateKeepNames(log logger.Log, options *config.Options) {
+	if options.KeepNames && options.UnsupportedJSFeatures.Has(compat.FunctionNameConfigurable) {
+		where := config.PrettyPrintTargetEnvironment(options.OriginalTargetEnv, options.UnsupportedJSFeatureOverridesMask)
+		log.AddErrorWithNotes(nil, logger.Range{}, fmt.Sprintf("The \"keep names\" setting cannot be used with %s", where), []logger.MsgData{{
+			Text: "In this environment, the \"Function.prototype.name\" property is not configurable and assigning to it will throw an error. " +
+				"Either use a newer target environment or disable the \"keep names\" setting."}})
+	}
 }
 
 func convertLocationToPublic(loc *logger.MsgLocation) *Location {
@@ -985,12 +954,16 @@ type internalContext struct {
 	args          rebuildArgs
 	activeBuild   *buildInProgress
 	recentBuild   *BuildResult
-	latestSummary buildSummary
 	realFS        fs.FS
 	absWorkingDir string
 	watcher       *watcher
 	handler       *apiHandler
 	didDispose    bool
+
+	// This saves just enough information to be able to compute a useful diff
+	// between two sets of output files. That way we don't need to hold both
+	// sets of output files in memory at once to compute a diff.
+	latestHashes map[string]string
 }
 
 func (ctx *internalContext) rebuild() rebuildState {
@@ -1016,14 +989,15 @@ func (ctx *internalContext) rebuild() rebuildState {
 	args := ctx.args
 	watcher := ctx.watcher
 	handler := ctx.handler
-	oldSummary := ctx.latestSummary
+	oldHashes := ctx.latestHashes
 	args.options.CancelFlag = &build.cancel
 	ctx.mutex.Unlock()
 
 	// Do the build without holding the mutex
-	build.state = rebuildImpl(args, oldSummary)
+	var newHashes map[string]string
+	build.state, newHashes = rebuildImpl(args, oldHashes)
 	if handler != nil {
-		handler.broadcastBuildResult(build.state.result, build.state.summary)
+		handler.broadcastBuildResult(build.state.result, newHashes)
 	}
 	if watcher != nil {
 		watcher.setWatchData(build.state.watchData)
@@ -1034,7 +1008,7 @@ func (ctx *internalContext) rebuild() rebuildState {
 	ctx.mutex.Lock()
 	ctx.activeBuild = nil
 	ctx.recentBuild = recentBuild
-	ctx.latestSummary = build.state.summary
+	ctx.latestHashes = newHashes
 	ctx.mutex.Unlock()
 
 	// Clear the recent build after it goes stale
@@ -1099,8 +1073,11 @@ func (ctx *internalContext) Watch(options WatchOptions) error {
 		return errors.New("Watch mode has already been enabled")
 	}
 
+	logLevel := ctx.args.logOptions.LogLevel
 	ctx.watcher = &watcher{
-		fs: ctx.realFS,
+		fs:        ctx.realFS,
+		shouldLog: logLevel == logger.LevelInfo || logLevel == logger.LevelDebug || logLevel == logger.LevelVerbose,
+		useColor:  ctx.args.logOptions.Color,
 		rebuild: func() fs.WatchData {
 			return ctx.rebuild().watchData
 		},
@@ -1110,7 +1087,7 @@ func (ctx *internalContext) Watch(options WatchOptions) error {
 	ctx.args.options.WatchMode = true
 
 	// Start the file watcher goroutine
-	ctx.watcher.start(ctx.args.logOptions.LogLevel, ctx.args.logOptions.Color)
+	ctx.watcher.start()
 
 	// Do the first watch mode build on another goroutine
 	go func() {
@@ -1294,7 +1271,7 @@ func validateBuildOptions(
 		ASCIIOnly:             validateASCIIOnly(buildOpts.Charset),
 		IgnoreDCEAnnotations:  buildOpts.IgnoreAnnotations,
 		TreeShaking:           validateTreeShaking(buildOpts.TreeShaking, buildOpts.Bundle, buildOpts.Format),
-		GlobalName:            validateGlobalName(log, buildOpts.GlobalName),
+		GlobalName:            validateGlobalName(log, buildOpts.GlobalName, "(global name)"),
 		CodeSplitting:         buildOpts.Splitting,
 		OutputFormat:          validateFormat(buildOpts.Format),
 		AbsOutputFile:         validatePath(log, realFS, buildOpts.Outfile, "outfile path"),
@@ -1309,7 +1286,7 @@ func validateBuildOptions(
 		ExtensionToLoader:     validateLoaders(log, buildOpts.Loader),
 		ExtensionOrder:        validateResolveExtensions(log, buildOpts.ResolveExtensions),
 		ExternalSettings:      validateExternals(log, realFS, buildOpts.External),
-		ExternalPackages:      buildOpts.Packages == PackagesExternal,
+		ExternalPackages:      validateExternalPackages(buildOpts.Packages),
 		PackageAliases:        validateAlias(log, realFS, buildOpts.Alias),
 		TSConfigPath:          validatePath(log, realFS, buildOpts.Tsconfig, "tsconfig path"),
 		TSConfigRaw:           buildOpts.TsconfigRaw,
@@ -1324,6 +1301,7 @@ func validateBuildOptions(
 		CSSFooter:             footerCSS,
 		PreserveSymlinks:      buildOpts.PreserveSymlinks,
 	}
+	validateKeepNames(log, &options)
 	if buildOpts.Conditions != nil {
 		options.Conditions = append([]string{}, buildOpts.Conditions...)
 	}
@@ -1334,11 +1312,18 @@ func validateBuildOptions(
 		options.AbsNodePaths[i] = validatePath(log, realFS, path, "node path")
 	}
 	entryPoints = make([]bundler.EntryPoint, 0, len(buildOpts.EntryPoints)+len(buildOpts.EntryPointsAdvanced))
+	hasEntryPointWithWildcard := false
 	for _, ep := range buildOpts.EntryPoints {
 		entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: ep})
+		if strings.ContainsRune(ep, '*') {
+			hasEntryPointWithWildcard = true
+		}
 	}
 	for _, ep := range buildOpts.EntryPointsAdvanced {
 		entryPoints = append(entryPoints, bundler.EntryPoint{InputPath: ep.InputPath, OutputPath: ep.OutputPath})
+		if strings.ContainsRune(ep.InputPath, '*') {
+			hasEntryPointWithWildcard = true
+		}
 	}
 	entryPointCount := len(entryPoints)
 	if buildOpts.Stdin != nil {
@@ -1351,7 +1336,7 @@ func validateBuildOptions(
 		}
 	}
 
-	if options.AbsOutputDir == "" && entryPointCount > 1 {
+	if options.AbsOutputDir == "" && (entryPointCount > 1 || hasEntryPointWithWildcard) {
 		log.AddError(nil, logger.Range{},
 			"Must use \"outdir\" when there are multiple input files")
 	} else if options.AbsOutputDir == "" && options.CodeSplitting {
@@ -1459,12 +1444,11 @@ type rebuildArgs struct {
 
 type rebuildState struct {
 	result    BuildResult
-	summary   buildSummary
 	watchData fs.WatchData
 	options   config.Options
 }
 
-func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
+func rebuildImpl(args rebuildArgs, oldHashes map[string]string) (rebuildState, map[string]string) {
 	log := logger.NewStderrLog(args.logOptions)
 
 	// All validation warnings are repeated for every rebuild
@@ -1497,7 +1481,7 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 
 	// The new build summary remains the same as the old one when there are
 	// errors. A failed build shouldn't erase the previous successful build.
-	newSummary := oldSummary
+	newHashes := oldHashes
 
 	// Stop now if there were errors
 	if !log.HasErrors() {
@@ -1515,17 +1499,24 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 			result.Metafile = metafile
 
 			// Populate the results to return
+			var hashBytes [8]byte
 			result.OutputFiles = make([]OutputFile, len(results))
+			newHashes = make(map[string]string)
 			for i, item := range results {
 				if args.options.WriteToStdout {
 					item.AbsPath = "<stdout>"
 				}
+				hasher := xxhash.New()
+				hasher.Write(item.Contents)
+				binary.LittleEndian.PutUint64(hashBytes[:], hasher.Sum64())
+				hash := base64.RawStdEncoding.EncodeToString(hashBytes[:])
 				result.OutputFiles[i] = OutputFile{
 					Path:     item.AbsPath,
 					Contents: item.Contents,
+					Hash:     hash,
 				}
+				newHashes[item.AbsPath] = hash
 			}
-			newSummary = summarizeOutputFiles(result.OutputFiles)
 
 			// Write output files before "OnEnd" callbacks run so they can expect
 			// output files to exist on the file system. "OnEnd" callbacks can be
@@ -1544,8 +1535,8 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 				} else {
 					// Delete old files that are no longer relevant
 					var toDelete []string
-					for absPath := range oldSummary {
-						if _, ok := newSummary[absPath]; !ok {
+					for absPath := range oldHashes {
+						if _, ok := newHashes[absPath]; !ok {
 							toDelete = append(toDelete, absPath)
 						}
 					}
@@ -1558,7 +1549,7 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 							defer waitGroup.Done()
 							fs.BeforeFileOpen()
 							defer fs.AfterFileClose()
-							if oldHash, ok := oldSummary[result.AbsPath]; ok && oldHash == newSummary[result.AbsPath] {
+							if oldHash, ok := oldHashes[result.AbsPath]; ok && oldHash == newHashes[result.AbsPath] {
 								if contents, err := ioutil.ReadFile(result.AbsPath); err == nil && bytes.Equal(contents, result.Contents) {
 									// Skip writing out files that haven't changed since last time
 									return
@@ -1568,9 +1559,9 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 								log.AddError(nil, logger.Range{}, fmt.Sprintf(
 									"Failed to create output directory: %s", err.Error()))
 							} else {
-								var mode os.FileMode = 0644
+								var mode os.FileMode = 0666
 								if result.IsExecutable {
-									mode = 0755
+									mode = 0777
 								}
 								if err := ioutil.WriteFile(result.AbsPath, result.Contents, mode); err != nil {
 									log.AddError(nil, logger.Range{}, fmt.Sprintf(
@@ -1665,10 +1656,9 @@ func rebuildImpl(args rebuildArgs, oldSummary buildSummary) rebuildState {
 
 	return rebuildState{
 		result:    result,
-		summary:   newSummary,
 		options:   args.options,
 		watchData: watchData,
-	}
+	}, newHashes
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1725,7 +1715,7 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 		SourceRoot:            transformOpts.SourceRoot,
 		ExcludeSourcesContent: transformOpts.SourcesContent == SourcesContentExclude,
 		OutputFormat:          validateFormat(transformOpts.Format),
-		GlobalName:            validateGlobalName(log, transformOpts.GlobalName),
+		GlobalName:            validateGlobalName(log, transformOpts.GlobalName, "(global name)"),
 		MinifySyntax:          transformOpts.MinifySyntax,
 		MinifyWhitespace:      transformOpts.MinifyWhitespace,
 		MinifyIdentifiers:     transformOpts.MinifyIdentifiers,
@@ -1746,7 +1736,8 @@ func transformImpl(input string, transformOpts TransformOptions) TransformResult
 			SourceFile: transformOpts.Sourcefile,
 		},
 	}
-	if options.Stdin.Loader == config.LoaderCSS {
+	validateKeepNames(log, &options)
+	if options.Stdin.Loader.IsCSS() {
 		options.CSSBanner = transformOpts.Banner
 		options.CSSFooter = transformOpts.Footer
 	} else {
@@ -1875,8 +1866,10 @@ func importKindToResolveKind(kind ast.ImportKind) ResolveKind {
 		return ResolveJSDynamicImport
 	case ast.ImportRequireResolve:
 		return ResolveJSRequireResolve
-	case ast.ImportAt, ast.ImportAtConditional:
+	case ast.ImportAt:
 		return ResolveCSSImportRule
+	case ast.ImportComposesFrom:
+		return ResolveCSSComposesFrom
 	case ast.ImportURL:
 		return ResolveCSSURLToken
 	default:
@@ -1898,6 +1891,8 @@ func resolveKindToImportKind(kind ResolveKind) ast.ImportKind {
 		return ast.ImportRequireResolve
 	case ResolveCSSImportRule:
 		return ast.ImportAt
+	case ResolveCSSComposesFrom:
+		return ast.ImportComposesFrom
 	case ResolveCSSURLToken:
 		return ast.ImportURL
 	default:
@@ -1924,6 +1919,7 @@ func (impl *pluginImpl) onResolve(options OnResolveOptions, callback func(OnReso
 				ResolveDir: args.ResolveDir,
 				Kind:       importKindToResolveKind(args.Kind),
 				PluginData: args.PluginData,
+				With:       args.With.DecodeIntoMap(),
 			})
 			result.PluginName = response.PluginName
 			result.AbsWatchFiles = impl.validatePathsArray(response.WatchFiles, "watch file")
@@ -1950,6 +1946,33 @@ func (impl *pluginImpl) onResolve(options OnResolveOptions, callback func(OnReso
 
 			// Convert log messages
 			result.Msgs = convertErrorsAndWarningsToInternal(response.Errors, response.Warnings)
+
+			// Warn if the plugin returned things without resolving the path
+			if response.Path == "" && !response.External {
+				var what string
+				if response.Namespace != "" {
+					what = "namespace"
+				} else if response.Suffix != "" {
+					what = "suffix"
+				} else if response.PluginData != nil {
+					what = "pluginData"
+				} else if response.WatchFiles != nil {
+					what = "watchFiles"
+				} else if response.WatchDirs != nil {
+					what = "watchDirs"
+				}
+				if what != "" {
+					path := "path"
+					if logger.API == logger.GoAPI {
+						what = strings.Title(what)
+						path = strings.Title(path)
+					}
+					result.Msgs = append(result.Msgs, logger.Msg{
+						Kind: logger.Warning,
+						Data: logger.MsgData{Text: fmt.Sprintf("Returning %q doesn't do anything when %q is empty", what, path)},
+					})
+				}
+			}
 			return
 		},
 	})
@@ -1971,6 +1994,7 @@ func (impl *pluginImpl) onLoad(options OnLoadOptions, callback func(OnLoadArgs) 
 				Namespace:  args.Path.Namespace,
 				PluginData: args.PluginData,
 				Suffix:     args.Path.IgnoredSuffix,
+				With:       args.Path.ImportAttributes.DecodeIntoMap(),
 			})
 			result.PluginName = response.PluginName
 			result.AbsWatchFiles = impl.validatePathsArray(response.WatchFiles, "watch file")
@@ -2075,6 +2099,7 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 				logger.Range{}, // importPathRange
 				logger.Path{Text: options.Importer, Namespace: options.Namespace},
 				path,
+				logger.EncodeImportAttributes(options.With),
 				kind,
 				absResolveDir,
 				options.PluginData,
@@ -2086,7 +2111,7 @@ func loadPlugins(initialOptions *BuildOptions, fs fs.FS, log logger.Log, caches 
 			result.Warnings = convertMessagesToPublic(logger.Warning, msgs)
 			if resolveResult != nil {
 				result.Path = resolveResult.PathPair.Primary.Text
-				result.External = resolveResult.IsExternal
+				result.External = resolveResult.PathPair.IsExternal
 				result.SideEffects = resolveResult.PrimarySideEffectsData == nil
 				result.Namespace = resolveResult.PathPair.Primary.Namespace
 				result.Suffix = resolveResult.PathPair.Primary.IgnoredSuffix
@@ -2344,11 +2369,11 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 				third := "100.0%"
 
 				table = append(table, tableEntry{
-					first:      fmt.Sprintf("%s%s%s", colors.Bold, entry.name, colors.Reset),
+					first:      entry.name,
 					firstLen:   utf8.RuneCountInString(entry.name),
-					second:     fmt.Sprintf("%s%s%s", colors.Bold, second, colors.Reset),
+					second:     second,
 					secondLen:  len(second),
-					third:      fmt.Sprintf("%s%s%s", colors.Bold, third, colors.Reset),
+					third:      third,
 					thirdLen:   len(third),
 					isTopLevel: true,
 				})
@@ -2425,8 +2450,10 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 			// Render the columns now that we know the widths
 			for _, entry := range table {
 				prefix := "\n"
+				color := colors.Bold
 				if !entry.isTopLevel {
 					prefix = ""
+					color = ""
 				}
 
 				// Import paths don't have second and third columns
@@ -2448,17 +2475,23 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 					extraSpace = 1
 				}
 
-				sb.WriteString(fmt.Sprintf("%s  %s %s%s%s %s %s%s%s %s\n",
+				sb.WriteString(fmt.Sprintf("%s  %s%s%s %s%s%s %s%s%s %s%s%s %s%s%s\n",
 					prefix,
+					color,
 					entry.first,
+					colors.Reset,
 					colors.Dim,
 					strings.Repeat(lineChar, extraSpace+maxFirstLen-entry.firstLen+maxSecondLen-entry.secondLen),
 					colors.Reset,
+					color,
 					secondTrimmed,
+					colors.Reset,
 					colors.Dim,
 					strings.Repeat(lineChar, extraSpace+maxThirdLen-entry.thirdLen+len(second)-len(secondTrimmed)),
 					colors.Reset,
+					color,
 					entry.third,
+					colors.Reset,
 				))
 			}
 
@@ -2467,21 +2500,6 @@ func analyzeMetafileImpl(metafile string, opts AnalyzeMetafileOptions) string {
 	}
 
 	return ""
-}
-
-type buildSummary map[string]uint64
-
-// This saves just enough information to be able to compute a useful diff
-// between two sets of output files. That way we don't need to hold both
-// sets of output files in memory at once to compute a diff.
-func summarizeOutputFiles(outputFiles []OutputFile) buildSummary {
-	summary := make(map[string]uint64)
-	for _, outputFile := range outputFiles {
-		hash := xxhash.New()
-		hash.Write(outputFile.Contents)
-		summary[outputFile.Path] = hash.Sum64()
-	}
-	return summary
 }
 
 func stripDirPrefix(path string, prefix string, allowedSlashes string) (string, bool) {

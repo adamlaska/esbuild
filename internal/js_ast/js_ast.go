@@ -242,21 +242,39 @@ var OpTable = []OpTableEntry{
 }
 
 type Decorator struct {
-	Value Expr
-	AtLoc logger.Loc
+	Value            Expr
+	AtLoc            logger.Loc
+	OmitNewlineAfter bool
 }
 
 type PropertyKind uint8
 
 const (
-	PropertyNormal PropertyKind = iota
-	PropertyGet
-	PropertySet
+	PropertyField PropertyKind = iota
+	PropertyMethod
+	PropertyGetter
+	PropertySetter
 	PropertyAutoAccessor
 	PropertySpread
-	PropertyDeclare
+	PropertyDeclareOrAbstract
 	PropertyClassStaticBlock
 )
+
+// This returns true if and only if this property matches the "MethodDefinition"
+// grammar from the specification. That means it's one of the following forms:
+//
+//	foo() {}
+//	*foo() {}
+//	async foo() {}
+//	async *foo() {}
+//	get foo() {}
+//	set foo(_) {}
+//
+// If this returns true, the "ValueOrNil" field of the property is always an
+// "EFunction" expression and it is always printed as a method.
+func (kind PropertyKind) IsMethodDefinition() bool {
+	return kind == PropertyMethod || kind == PropertyGetter || kind == PropertySetter
+}
 
 type ClassStaticBlock struct {
 	Block SBlock
@@ -267,7 +285,6 @@ type PropertyFlags uint8
 
 const (
 	PropertyIsComputed PropertyFlags = 1 << iota
-	PropertyIsMethod
 	PropertyIsStatic
 	PropertyWasShorthand
 	PropertyPreferQuotedKey
@@ -356,6 +373,15 @@ type Class struct {
 	ClassKeyword  logger.Range
 	BodyLoc       logger.Loc
 	CloseBraceLoc logger.Loc
+
+	// If true, JavaScript decorators (i.e. not TypeScript experimental
+	// decorators) should be lowered. This is the case either if JavaScript
+	// decorators are not supported in the configured target environment, or
+	// if "useDefineForClassFields" is set to false and this class has
+	// decorators on it. Note that this flag is not necessarily set to true if
+	// "useDefineForClassFields" is false and a class has an "accessor" even
+	// though the accessor feature comes from the decorator specification.
+	ShouldLowerStandardDecorators bool
 
 	// If true, property field initializers cannot be assumed to have no side
 	// effects. For example:
@@ -448,6 +474,7 @@ func (*EImportIdentifier) isExpr()     {}
 func (*EPrivateIdentifier) isExpr()    {}
 func (*ENameOfSymbol) isExpr()         {}
 func (*EJSXElement) isExpr()           {}
+func (*EJSXText) isExpr()              {}
 func (*EMissing) isExpr()              {}
 func (*ENumber) isExpr()               {}
 func (*EBigInt) isExpr()               {}
@@ -548,6 +575,7 @@ var EUndefinedShared = &EUndefined{}
 var SDebuggerShared = &SDebugger{}
 var SEmptyShared = &SEmpty{}
 var STypeScriptShared = &STypeScript{}
+var STypeScriptSharedWasDeclareClass = &STypeScript{WasDeclareClass: true}
 
 type ENew struct {
 	Target Expr
@@ -622,12 +650,17 @@ type EDot struct {
 	// unwrapped if the resulting value is unused. Unwrapping means discarding
 	// the call target but keeping any arguments with side effects.
 	CallCanBeUnwrappedIfUnused bool
+
+	// Symbol values are known to not have side effects when used as property
+	// names in class declarations and object literals.
+	IsSymbolInstance bool
 }
 
 func (a *EDot) HasSameFlagsAs(b *EDot) bool {
 	return a.OptionalChain == b.OptionalChain &&
 		a.CanBeRemovedIfUnused == b.CanBeRemovedIfUnused &&
-		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused
+		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused &&
+		a.IsSymbolInstance == b.IsSymbolInstance
 }
 
 type EIndex struct {
@@ -644,12 +677,17 @@ type EIndex struct {
 	// unwrapped if the resulting value is unused. Unwrapping means discarding
 	// the call target but keeping any arguments with side effects.
 	CallCanBeUnwrappedIfUnused bool
+
+	// Symbol values are known to not have side effects when used as property
+	// names in class declarations and object literals.
+	IsSymbolInstance bool
 }
 
 func (a *EIndex) HasSameFlagsAs(b *EIndex) bool {
 	return a.OptionalChain == b.OptionalChain &&
 		a.CanBeRemovedIfUnused == b.CanBeRemovedIfUnused &&
-		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused
+		a.CallCanBeUnwrappedIfUnused == b.CallCanBeUnwrappedIfUnused &&
+		a.IsSymbolInstance == b.IsSymbolInstance
 }
 
 type EArrow struct {
@@ -758,6 +796,16 @@ type EJSXElement struct {
 	IsTagSingleLine bool
 }
 
+// The JSX specification doesn't say how JSX text is supposed to be interpreted
+// so our "preserve" JSX transform should reproduce the original source code
+// verbatim. One reason why this matters is because there is no canonical way
+// to interpret JSX text (Babel and TypeScript differ in what newlines mean).
+// Another reason is that some people want to do custom things such as this:
+// https://github.com/evanw/esbuild/issues/3605
+type EJSXText struct {
+	Raw string
+}
+
 type ENumber struct{ Value float64 }
 
 type EBigInt struct{ Value string }
@@ -779,6 +827,7 @@ type EString struct {
 	LegacyOctalLoc        logger.Loc
 	PreferTemplate        bool
 	HasPropertyKeyComment bool // If true, a preceding comment contains "@__KEY__"
+	ContainsUniqueKey     bool // If true, this string must not be wrapped
 }
 
 type TemplatePart struct {
@@ -795,6 +844,13 @@ type ETemplate struct {
 	Parts          []TemplatePart
 	HeadLoc        logger.Loc
 	LegacyOctalLoc logger.Loc
+
+	// True if this is a tagged template literal with a comment that indicates
+	// this function call can be removed if the result is unused. Note that the
+	// arguments are not considered to be part of the call. If the call itself
+	// is removed due to this annotation, the arguments must remain if they have
+	// side effects (including the string conversions).
+	CanBeUnwrappedIfUnused bool
 
 	// If the tag is present, it is expected to be a function and is called. If
 	// the tag is a syntactic property access, then the value for "this" in the
@@ -917,7 +973,9 @@ type SBlock struct {
 type SEmpty struct{}
 
 // This is a stand-in for a TypeScript type declaration
-type STypeScript struct{}
+type STypeScript struct {
+	WasDeclareClass bool
+}
 
 type SComment struct {
 	Text           string
@@ -1018,34 +1076,40 @@ type SClass struct {
 }
 
 type SLabel struct {
-	Stmt Stmt
-	Name ast.LocRef
+	Stmt             Stmt
+	Name             ast.LocRef
+	IsSingleLineStmt bool
 }
 
 type SIf struct {
-	Test    Expr
-	Yes     Stmt
-	NoOrNil Stmt
+	Test            Expr
+	Yes             Stmt
+	NoOrNil         Stmt
+	IsSingleLineYes bool
+	IsSingleLineNo  bool
 }
 
 type SFor struct {
-	InitOrNil   Stmt // May be a SConst, SLet, SVar, or SExpr
-	TestOrNil   Expr
-	UpdateOrNil Expr
-	Body        Stmt
+	InitOrNil        Stmt // May be a SConst, SLet, SVar, or SExpr
+	TestOrNil        Expr
+	UpdateOrNil      Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SForIn struct {
-	Init  Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value Expr
-	Body  Stmt
+	Init             Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value            Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SForOf struct {
-	Init  Stmt // May be a SConst, SLet, SVar, or SExpr
-	Value Expr
-	Body  Stmt
-	Await logger.Range
+	Init             Stmt // May be a SConst, SLet, SVar, or SExpr
+	Value            Expr
+	Body             Stmt
+	Await            logger.Range
+	IsSingleLineBody bool
 }
 
 type SDoWhile struct {
@@ -1054,14 +1118,16 @@ type SDoWhile struct {
 }
 
 type SWhile struct {
-	Test Expr
-	Body Stmt
+	Test             Expr
+	Body             Stmt
+	IsSingleLineBody bool
 }
 
 type SWith struct {
-	Value   Expr
-	Body    Stmt
-	BodyLoc logger.Loc
+	Value            Expr
+	Body             Stmt
+	BodyLoc          logger.Loc
+	IsSingleLineBody bool
 }
 
 type Catch struct {

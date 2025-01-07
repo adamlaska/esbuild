@@ -12,6 +12,7 @@ const (
 	MsgID_None MsgID = iota
 
 	// JavaScript
+	MsgID_JS_AssertToWith
 	MsgID_JS_AssertTypeJSON
 	MsgID_JS_AssignToConstant
 	MsgID_JS_AssignToDefine
@@ -35,6 +36,8 @@ const (
 	MsgID_JS_SemicolonAfterReturn
 	MsgID_JS_SuspiciousBooleanNot
 	MsgID_JS_SuspiciousDefine
+	MsgID_JS_SuspiciousLogicalOperator
+	MsgID_JS_SuspiciousNullishCoalescing
 	MsgID_JS_ThisIsUndefinedInESM
 	MsgID_JS_UnsupportedDynamicImport
 	MsgID_JS_UnsupportedJSXComment
@@ -48,6 +51,7 @@ const (
 	MsgID_CSS_InvalidAtLayer
 	MsgID_CSS_InvalidCalc
 	MsgID_CSS_JSCommentInCSS
+	MsgID_CSS_UndefinedComposesFrom
 	MsgID_CSS_UnsupportedAtCharset
 	MsgID_CSS_UnsupportedAtNamespace
 	MsgID_CSS_UnsupportedCSSProperty
@@ -56,6 +60,7 @@ const (
 	// Bundler
 	MsgID_Bundler_AmbiguousReexport
 	MsgID_Bundler_DifferentPathCase
+	MsgID_Bundler_EmptyGlob
 	MsgID_Bundler_IgnoredBareImport
 	MsgID_Bundler_IgnoredDynamicImport
 	MsgID_Bundler_ImportIsUndefined
@@ -69,6 +74,7 @@ const (
 
 	// package.json
 	MsgID_PackageJSON_FIRST // Keep this first
+	MsgID_PackageJSON_DeadCondition
 	MsgID_PackageJSON_InvalidBrowser
 	MsgID_PackageJSON_InvalidImportsOrExports
 	MsgID_PackageJSON_InvalidSideEffects
@@ -82,6 +88,7 @@ const (
 	MsgID_TSConfigJSON_InvalidJSX
 	MsgID_TSConfigJSON_InvalidPaths
 	MsgID_TSConfigJSON_InvalidTarget
+	MsgID_TSConfigJSON_InvalidTopLevelOption
 	MsgID_TSConfigJSON_Missing
 	MsgID_TSConfigJSON_LAST // Keep this last
 
@@ -91,6 +98,8 @@ const (
 func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel) {
 	switch str {
 	// JS
+	case "assert-to-with":
+		overrides[MsgID_JS_AssertToWith] = logLevel
 	case "assert-type-json":
 		overrides[MsgID_JS_AssertTypeJSON] = logLevel
 	case "assign-to-constant":
@@ -137,6 +146,10 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 		overrides[MsgID_JS_SuspiciousBooleanNot] = logLevel
 	case "suspicious-define":
 		overrides[MsgID_JS_SuspiciousDefine] = logLevel
+	case "suspicious-logical-operator":
+		overrides[MsgID_JS_SuspiciousLogicalOperator] = logLevel
+	case "suspicious-nullish-coalescing":
+		overrides[MsgID_JS_SuspiciousNullishCoalescing] = logLevel
 	case "this-is-undefined-in-esm":
 		overrides[MsgID_JS_ThisIsUndefinedInESM] = logLevel
 	case "unsupported-dynamic-import":
@@ -161,6 +174,8 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 		overrides[MsgID_CSS_InvalidCalc] = logLevel
 	case "js-comment-in-css":
 		overrides[MsgID_CSS_JSCommentInCSS] = logLevel
+	case "undefined-composes-from":
+		overrides[MsgID_CSS_UndefinedComposesFrom] = logLevel
 	case "unsupported-@charset":
 		overrides[MsgID_CSS_UnsupportedAtCharset] = logLevel
 	case "unsupported-@namespace":
@@ -175,6 +190,8 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 		overrides[MsgID_Bundler_AmbiguousReexport] = logLevel
 	case "different-path-case":
 		overrides[MsgID_Bundler_DifferentPathCase] = logLevel
+	case "empty-glob":
+		overrides[MsgID_Bundler_EmptyGlob] = logLevel
 	case "ignored-bare-import":
 		overrides[MsgID_Bundler_IgnoredBareImport] = logLevel
 	case "ignored-dynamic-import":
@@ -213,6 +230,8 @@ func StringToMsgIDs(str string, logLevel LogLevel, overrides map[MsgID]LogLevel)
 func MsgIDToString(id MsgID) string {
 	switch id {
 	// JS
+	case MsgID_JS_AssertToWith:
+		return "assert-to-with"
 	case MsgID_JS_AssertTypeJSON:
 		return "assert-type-json"
 	case MsgID_JS_AssignToConstant:
@@ -259,6 +278,10 @@ func MsgIDToString(id MsgID) string {
 		return "suspicious-boolean-not"
 	case MsgID_JS_SuspiciousDefine:
 		return "suspicious-define"
+	case MsgID_JS_SuspiciousLogicalOperator:
+		return "suspicious-logical-operator"
+	case MsgID_JS_SuspiciousNullishCoalescing:
+		return "suspicious-nullish-coalescing"
 	case MsgID_JS_ThisIsUndefinedInESM:
 		return "this-is-undefined-in-esm"
 	case MsgID_JS_UnsupportedDynamicImport:
@@ -283,6 +306,8 @@ func MsgIDToString(id MsgID) string {
 		return "invalid-calc"
 	case MsgID_CSS_JSCommentInCSS:
 		return "js-comment-in-css"
+	case MsgID_CSS_UndefinedComposesFrom:
+		return "undefined-composes-from"
 	case MsgID_CSS_UnsupportedAtCharset:
 		return "unsupported-@charset"
 	case MsgID_CSS_UnsupportedAtNamespace:
@@ -297,6 +322,8 @@ func MsgIDToString(id MsgID) string {
 		return "ambiguous-reexport"
 	case MsgID_Bundler_DifferentPathCase:
 		return "different-path-case"
+	case MsgID_Bundler_EmptyGlob:
+		return "empty-glob"
 	case MsgID_Bundler_IgnoredBareImport:
 		return "ignored-bare-import"
 	case MsgID_Bundler_IgnoredDynamicImport:

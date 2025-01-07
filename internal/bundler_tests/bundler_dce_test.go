@@ -1222,6 +1222,31 @@ func TestRemoveUnusedPureCommentCalls(t *testing.T) {
 	})
 }
 
+func TestRemoveUnusedNoSideEffectsTaggedTemplates(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				// @__NO_SIDE_EFFECTS__
+				function foo() {}
+
+				foo` + "`remove`" + `;
+				foo` + "`remove${null}`" + `;
+				foo` + "`remove${123}`" + `;
+
+				use(foo` + "`keep`" + `);
+				foo` + "`remove this part ${keep} and this ${alsoKeep}`" + `;
+				` + "`remove this part ${keep} and this ${alsoKeep}`" + `;
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			MinifySyntax:  true,
+		},
+	})
+}
+
 func TestTreeShakingReactElements(t *testing.T) {
 	dce_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1247,9 +1272,9 @@ func TestTreeShakingReactElements(t *testing.T) {
 }
 
 func TestDisableTreeShaking(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"pure":    {CallCanBeUnwrappedIfUnused: true},
-		"some.fn": {CallCanBeUnwrappedIfUnused: true},
+	defines := config.ProcessDefines([]config.DefineData{
+		{KeyParts: []string{"pure"}, Flags: config.CallCanBeUnwrappedIfUnused},
+		{KeyParts: []string{"some", "fn"}, Flags: config.CallCanBeUnwrappedIfUnused},
 	})
 	dce_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -1376,6 +1401,31 @@ func TestDeadCodeFollowingJump(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 			MinifySyntax:  true,
+		},
+	})
+}
+
+func TestDeadCodeInsideEmptyTry(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				try { foo() }
+				catch { require('./a') }
+				finally { require('./b') }
+
+				try {}
+				catch { require('./c') }
+				finally { require('./d') }
+			`,
+			"/a.js": ``,
+			"/b.js": ``,
+			"/c.js": `TEST FAILED`, // Dead code paths should not import code
+			"/d.js": ``,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
 		},
 	})
 }
@@ -3113,7 +3163,7 @@ func TestConstValueInliningDirectEval(t *testing.T) {
 	})
 }
 
-func TestCrossModuleConstantFolding(t *testing.T) {
+func TestCrossModuleConstantFoldingNumber(t *testing.T) {
 	dce_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/enum-constants.ts": `
@@ -3158,6 +3208,8 @@ func TestCrossModuleConstantFolding(t *testing.T) {
 					x.a && x.b,
 					x.a || x.b,
 					x.a ?? x.b,
+					x.a ? 'y' : 'n',
+					!x.b ? 'y' : 'n',
 				])
 			`,
 
@@ -3201,6 +3253,8 @@ func TestCrossModuleConstantFolding(t *testing.T) {
 					a && b,
 					a || b,
 					a ?? b,
+					a ? 'y' : 'n',
+					!b ? 'y' : 'n',
 				])
 			`,
 
@@ -3219,6 +3273,98 @@ func TestCrossModuleConstantFolding(t *testing.T) {
 				console.log({
 					'should be 4': ~(~a & ~b) & (b | c),
 					'should be 32': ~(~x.a & ~x.b) & (x.b | x.c),
+				})
+			`,
+		},
+		entryPaths: []string{
+			"/enum-entry.ts",
+			"/const-entry.js",
+			"/nested-entry.ts",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			MinifySyntax: true,
+		},
+	})
+}
+
+func TestCrossModuleConstantFoldingString(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/enum-constants.ts": `
+				export enum x {
+					a = 'foo',
+					b = 'bar',
+				}
+			`,
+			"/enum-entry.ts": `
+				import { x } from './enum-constants'
+				console.log([
+					typeof x.b,
+				], [
+					x.a + x.b,
+				], [
+					x.a < x.b,
+					x.a > x.b,
+					x.a <= x.b,
+					x.a >= x.b,
+					x.a == x.b,
+					x.a != x.b,
+					x.a === x.b,
+					x.a !== x.b,
+				], [
+					x.a && x.b,
+					x.a || x.b,
+					x.a ?? x.b,
+					x.a ? 'y' : 'n',
+					!x.b ? 'y' : 'n',
+				])
+			`,
+
+			"/const-constants.js": `
+				export const a = 'foo'
+				export const b = 'bar'
+			`,
+			"/const-entry.js": `
+				import { a, b } from './const-constants'
+				console.log([
+					typeof b,
+				], [
+					a + b,
+				], [
+					a < b,
+					a > b,
+					a <= b,
+					a >= b,
+					a == b,
+					a != b,
+					a === b,
+					a !== b,
+				], [
+					a && b,
+					a || b,
+					a ?? b,
+					a ? 'y' : 'n',
+					!b ? 'y' : 'n',
+				])
+			`,
+
+			"/nested-constants.ts": `
+				export const a = 'foo'
+				export const b = 'bar'
+				export const c = 'baz'
+				export enum x {
+					a = 'FOO',
+					b = 'BAR',
+					c = 'BAZ',
+				}
+			`,
+			"/nested-entry.ts": `
+				import { a, b, c, x } from './nested-constants'
+				console.log({
+					'should be foobarbaz': a + b + c,
+					'should be FOOBARBAZ': x.a + x.b + x.c,
 				})
 			`,
 		},
@@ -4302,6 +4448,8 @@ func TestDCEOfIIFE(t *testing.T) {
 				(() => { /* @__PURE__ */ removeMe() })();
 				var someVar;
 				(x => {})(someVar);
+				var removeThis = /* @__PURE__ */ (() => stuff())();
+				var removeThis2 = (() => 123)();
 			`,
 			"/keep-these.js": `
 				undef = (() => {})();
@@ -4310,6 +4458,15 @@ func TestDCEOfIIFE(t *testing.T) {
 				var someVar;
 				(([y]) => {})(someVar);
 				(({z}) => {})(someVar);
+				var keepThis = /* @__PURE__ */ (() => stuff())();
+				keepThis();
+				((_ = keepMe()) => {})();
+				var isPure = ((x, y) => 123)();
+				use(isPure);
+				var isNotPure = ((x = foo, y = bar) => 123)();
+				use(isNotPure);
+				(async () => ({ get then() { notPure() } }))();
+				(async function() { return { get then() { notPure() } }; })();
 			`,
 		},
 		entryPaths: []string{
@@ -4320,6 +4477,34 @@ func TestDCEOfIIFE(t *testing.T) {
 			AbsOutputDir: "/out",
 			MinifySyntax: true,
 			TreeShaking:  true,
+		},
+	})
+}
+
+func TestDCEOfDestructuring(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				// Identifier bindings
+				var remove1
+				var remove2 = null
+				var KEEP1 = x
+
+				// Array patterns
+				var [remove3] = []
+				var [remove4, ...remove5] = [...[1, 2], 3]
+				var [, , remove6] = [, , 3]
+				var [KEEP2] = [x]
+				var [KEEP3] = [...{}]
+
+				// Object patterns (not handled right now)
+				var { KEEP4 } = {}
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
 		},
 	})
 }
@@ -4507,6 +4692,60 @@ func TestRemoveCodeAfterLabelWithReturn(t *testing.T) {
 		options: config.Options{
 			AbsOutputFile: "/out.js",
 			MinifySyntax:  true,
+		},
+	})
+}
+
+func TestDropLabelTreeShakingBugIssue3311(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				const myFunc = ()=> {
+					DROP: {console.log("drop")}
+					console.log("keep")
+				}
+				export default myFunc
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			DropLabels:    []string{"DROP"},
+			OutputFormat:  config.FormatESModule,
+		},
+	})
+}
+
+func TestDCEOfSymbolInstances(t *testing.T) {
+	dce_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/class.js": `
+				class Remove1 {}
+				class Remove2 { *[Symbol.iterator]() {} }
+				class Remove3 { *[Symbol['iterator']]() {} }
+
+				class Keep1 { *[Symbol.iterator]() {} [keep] }
+				class Keep2 { [keep]; *[Symbol.iterator]() {} }
+				class Keep3 { *[Symbol.wtf]() {} }
+			`,
+			"/object.js": `
+				let remove1 = {}
+				let remove2 = { *[Symbol.iterator]() {} }
+				let remove3 = { *[Symbol['iterator']]() {} }
+
+				let keep1 = { *[Symbol.iterator]() {}, [keep]: null }
+				let keep2 = { [keep]: null, *[Symbol.iterator]() {} }
+				let keep3 = { *[Symbol.wtf]() {} }
+			`,
+		},
+		entryPaths: []string{
+			"/class.js",
+			"/object.js",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
 		},
 	})
 }

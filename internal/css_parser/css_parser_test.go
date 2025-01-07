@@ -12,12 +12,12 @@ import (
 	"github.com/evanw/esbuild/internal/test"
 )
 
-func expectPrintedCommon(t *testing.T, name string, contents string, expected string, expectedLog string, options config.Options) {
+func expectPrintedCommon(t *testing.T, name string, contents string, expected string, expectedLog string, loader config.Loader, options config.Options) {
 	t.Helper()
 	t.Run(name, func(t *testing.T) {
 		t.Helper()
 		log := logger.NewDeferLog(logger.DeferLogNoVerboseOrDebug, nil)
-		tree := Parse(log, test.SourceForTest(contents), OptionsFromConfig(config.LoaderCSS, &options))
+		tree := Parse(log, test.SourceForTest(contents), OptionsFromConfig(loader, &options))
 		msgs := log.Done()
 		text := ""
 		for _, msg := range msgs {
@@ -35,55 +35,60 @@ func expectPrintedCommon(t *testing.T, name string, contents string, expected st
 
 func expectPrinted(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents, contents, expected, expectedLog, config.Options{})
+	expectPrintedCommon(t, contents, contents, expected, expectedLog, config.LoaderCSS, config.Options{})
+}
+
+func expectPrintedLocal(t *testing.T, contents string, expected string, expectedLog string) {
+	t.Helper()
+	expectPrintedCommon(t, contents+" [local]", contents, expected, expectedLog, config.LoaderLocalCSS, config.Options{})
 }
 
 func expectPrintedLower(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [lower]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [lower]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		UnsupportedCSSFeatures: ^compat.CSSFeature(0),
 	})
 }
 
 func expectPrintedLowerUnsupported(t *testing.T, unsupportedCSSFeatures compat.CSSFeature, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [lower]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [lower]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		UnsupportedCSSFeatures: unsupportedCSSFeatures,
 	})
 }
 
 func expectPrintedWithAllPrefixes(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [prefixed]", contents, expected, expectedLog, config.Options{
-		CSSPrefixData: compat.CSSPrefixData(map[compat.Engine][]int{
-			compat.Chrome:  {0},
-			compat.Edge:    {0},
-			compat.Firefox: {0},
-			compat.IE:      {0},
-			compat.IOS:     {0},
-			compat.Opera:   {0},
-			compat.Safari:  {0},
+	expectPrintedCommon(t, contents+" [prefixed]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
+		CSSPrefixData: compat.CSSPrefixData(map[compat.Engine]compat.Semver{
+			compat.Chrome:  {Parts: []int{0}},
+			compat.Edge:    {Parts: []int{0}},
+			compat.Firefox: {Parts: []int{0}},
+			compat.IE:      {Parts: []int{0}},
+			compat.IOS:     {Parts: []int{0}},
+			compat.Opera:   {Parts: []int{0}},
+			compat.Safari:  {Parts: []int{0}},
 		}),
 	})
 }
 
 func expectPrintedMinify(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [minify]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [minify]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		MinifyWhitespace: true,
 	})
 }
 
 func expectPrintedMangle(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [mangle]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [mangle]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		MinifySyntax: true,
 	})
 }
 
 func expectPrintedLowerMangle(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [lower, mangle]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [lower, mangle]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		UnsupportedCSSFeatures: ^compat.CSSFeature(0),
 		MinifySyntax:           true,
 	})
@@ -91,7 +96,7 @@ func expectPrintedLowerMangle(t *testing.T, contents string, expected string, ex
 
 func expectPrintedMangleMinify(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [mangle, minify]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [mangle, minify]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		MinifySyntax:     true,
 		MinifyWhitespace: true,
 	})
@@ -99,7 +104,7 @@ func expectPrintedMangleMinify(t *testing.T, contents string, expected string, e
 
 func expectPrintedLowerMinify(t *testing.T, contents string, expected string, expectedLog string) {
 	t.Helper()
-	expectPrintedCommon(t, contents+" [lower, minify]", contents, expected, expectedLog, config.Options{
+	expectPrintedCommon(t, contents+" [lower, minify]", contents, expected, expectedLog, config.LoaderCSS, config.Options{
 		UnsupportedCSSFeatures: ^compat.CSSFeature(0),
 		MinifyWhitespace:       true,
 	})
@@ -370,6 +375,27 @@ func TestNumber(t *testing.T) {
 	}
 }
 
+func TestURL(t *testing.T) {
+	expectPrinted(t, "a { background: url(foo.png) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url('foo.png') }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\" ) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\"\t) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\"\r) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\"\n) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\"\f) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\"\r\n) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url( \"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\t\"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\r\"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\n\"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\f\"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\r\n\"foo.png\") }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url( \"foo.png\" ) }", "a {\n  background: url(foo.png);\n}\n", "")
+	expectPrinted(t, "a { background: url(\"foo.png\" extra-stuff) }", "a {\n  background: url(\"foo.png\" extra-stuff);\n}\n", "")
+	expectPrinted(t, "a { background: url( \"foo.png\" extra-stuff ) }", "a {\n  background: url(\"foo.png\" extra-stuff);\n}\n", "")
+}
+
 func TestHexColor(t *testing.T) {
 	// "#RGBA"
 
@@ -496,6 +522,97 @@ func TestHexColor(t *testing.T) {
 	expectPrintedMangle(t, "a { color: #AABBCCEF }", "a {\n  color: #aabbccef;\n}\n", "")
 }
 
+func TestColorFunctions(t *testing.T) {
+	expectPrinted(t, "a { color: color(display-p3 0.5 0.0 0.0%) }", "a {\n  color: color(display-p3 0.5 0.0 0.0%);\n}\n", "")
+	expectPrinted(t, "a { color: color(display-p3 0.5 0.0 0.0% / 0.5) }", "a {\n  color: color(display-p3 0.5 0.0 0.0% / 0.5);\n}\n", "")
+
+	// Check minification of tokens
+	expectPrintedMangle(t, "a { color: color(display-p3 0.5 0.0 0.0%) }", "a {\n  color: color(display-p3 .5 0 0%);\n}\n", "")
+	expectPrintedMangle(t, "a { color: color(display-p3 0.5 0.0 0.0% / 0.5) }", "a {\n  color: color(display-p3 .5 0 0% / .5);\n}\n", "")
+
+	// Check out-of-range colors
+	expectPrintedLower(t, "a { before: 0; color: color(display-p3 1 0 0); after: 1 }",
+		"a {\n  before: 0;\n  color: #ff0f0e;\n  color: color(display-p3 1 0 0);\n  after: 1;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { before: 0; color: color(display-p3 1 0 0); after: 1 }",
+		"a {\n  before: 0;\n  color: #ff0f0e;\n  color: color(display-p3 1 0 0);\n  after: 1;\n}\n", "")
+	expectPrintedLower(t, "a { before: 0; color: color(display-p3 1 0 0 / 0.5); after: 1 }",
+		"a {\n  before: 0;\n  color: rgba(255, 15, 14, .5);\n  color: color(display-p3 1 0 0 / 0.5);\n  after: 1;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { before: 0; color: color(display-p3 1 0 0 / 0.5); after: 1 }",
+		"a {\n  before: 0;\n  color: rgba(255, 15, 14, .5);\n  color: color(display-p3 1 0 0 / .5);\n  after: 1;\n}\n", "")
+	expectPrintedLower(t, "a { before: 0; background: color(display-p3 1 0 0); after: 1 }",
+		"a {\n  before: 0;\n  background: #ff0f0e;\n  background: color(display-p3 1 0 0);\n  after: 1;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { before: 0; background: color(display-p3 1 0 0); after: 1 }",
+		"a {\n  before: 0;\n  background: #ff0f0e;\n  background: color(display-p3 1 0 0);\n  after: 1;\n}\n", "")
+	expectPrintedLower(t, "a { before: 0; background: color(display-p3 1 0 0 / 0.5); after: 1 }",
+		"a {\n  before: 0;\n  background: rgba(255, 15, 14, .5);\n  background: color(display-p3 1 0 0 / 0.5);\n  after: 1;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { before: 0; background: color(display-p3 1 0 0 / 0.5); after: 1 }",
+		"a {\n  before: 0;\n  background: rgba(255, 15, 14, .5);\n  background: color(display-p3 1 0 0 / .5);\n  after: 1;\n}\n", "")
+	expectPrintedLower(t, "a { before: 0; box-shadow: 1px color(display-p3 1 0 0); after: 1 }",
+		"a {\n  before: 0;\n  box-shadow: 1px #ff0f0e;\n  box-shadow: 1px color(display-p3 1 0 0);\n  after: 1;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { before: 0; box-shadow: 1px color(display-p3 1 0 0); after: 1 }",
+		"a {\n  before: 0;\n  box-shadow: 1px #ff0f0e;\n  box-shadow: 1px color(display-p3 1 0 0);\n  after: 1;\n}\n", "")
+	expectPrintedLower(t, "a { before: 0; box-shadow: 1px color(display-p3 1 0 0 / 0.5); after: 1 }",
+		"a {\n  before: 0;\n  box-shadow: 1px rgba(255, 15, 14, .5);\n  box-shadow: 1px color(display-p3 1 0 0 / 0.5);\n  after: 1;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { before: 0; box-shadow: 1px color(display-p3 1 0 0 / 0.5); after: 1 }",
+		"a {\n  before: 0;\n  box-shadow: 1px rgba(255, 15, 14, .5);\n  box-shadow: 1px color(display-p3 1 0 0 / .5);\n  after: 1;\n}\n", "")
+
+	// Don't insert a fallback after a previous instance of the same property
+	expectPrintedLower(t, "a { color: red; color: color(display-p3 1 0 0) }",
+		"a {\n  color: red;\n  color: color(display-p3 1 0 0);\n}\n", "")
+	expectPrintedLower(t, "a { color: color(display-p3 1 0 0); color: color(display-p3 0 1 0) }",
+		"a {\n  color: #ff0f0e;\n  color: color(display-p3 1 0 0);\n  color: color(display-p3 0 1 0);\n}\n", "")
+
+	// Check case sensitivity
+	expectPrintedLower(t, "a { color: color(srgb 0.87 0.98 0.807) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "A { Color: Color(Srgb 0.87 0.98 0.807) }", "A {\n  Color: #deface;\n}\n", "")
+	expectPrintedLower(t, "A { COLOR: COLOR(SRGB 0.87 0.98 0.807) }", "A {\n  COLOR: #deface;\n}\n", "")
+
+	// Check in-range colors in various color spaces
+	expectPrintedLower(t, "a { color: color(a98-rgb 0.9 0.98 0.81) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(a98-rgb 90% 98% 81%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(display-p3 0.89 0.977 0.823) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(display-p3 89% 97.7% 82.3%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(prophoto-rgb 0.877 0.959 0.793) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(prophoto-rgb 87.7% 95.9% 79.3%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(rec2020 0.895 0.968 0.805) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(rec2020 89.5% 96.8% 80.5%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(srgb 0.87 0.98 0.807) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(srgb 87% 98% 80.7%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(srgb-linear 0.73 0.96 0.62) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(srgb-linear 73% 96% 62%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(xyz 0.754 0.883 0.715) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(xyz 75.4% 88.3% 71.5%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(xyz-d50 0.773 0.883 0.545) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(xyz-d50 77.3% 88.3% 54.5%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(xyz-d65 0.754 0.883 0.715) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: color(xyz-d65 75.4% 88.3% 71.5%) }", "a {\n  color: #deface;\n}\n", "")
+
+	// Check color functions with unusual percent reference ranges
+	expectPrintedLower(t, "a { color: lab(95.38 -15 18) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lab(95.38% -15 18) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lab(95.38 -12% 18) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lab(95.38% -15 14.4%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lch(95.38 23.57 130.22) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lch(95.38% 23.57 130.22) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lch(95.38 19% 130.22) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: lch(95.38 23.57 0.362turn) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklab(0.953 -0.045 0.046) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklab(95.3% -0.045 0.046) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklab(0.953 -11.2% 0.046) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklab(0.953 -0.045 11.5%) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklch(0.953 0.064 134) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklch(95.3% 0.064 134) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklch(0.953 16% 134) }", "a {\n  color: #deface;\n}\n", "")
+	expectPrintedLower(t, "a { color: oklch(0.953 0.064 0.372turn) }", "a {\n  color: #deface;\n}\n", "")
+
+	// Test alpha
+	expectPrintedLower(t, "a { color: color(srgb 0.87 0.98 0.807 / 0.5) }", "a {\n  color: rgba(222, 250, 206, .5);\n}\n", "")
+	expectPrintedLower(t, "a { color: lab(95.38 -15 18 / 0.5) }", "a {\n  color: rgba(222, 250, 206, .5);\n}\n", "")
+	expectPrintedLower(t, "a { color: lch(95.38 23.57 130.22 / 0.5) }", "a {\n  color: rgba(222, 250, 206, .5);\n}\n", "")
+	expectPrintedLower(t, "a { color: oklab(0.953 -0.045 0.046 / 0.5) }", "a {\n  color: rgba(222, 250, 206, .5);\n}\n", "")
+	expectPrintedLower(t, "a { color: oklch(0.953 0.064 134 / 0.5) }", "a {\n  color: rgba(222, 250, 206, .5);\n}\n", "")
+}
+
 func TestColorNames(t *testing.T) {
 	expectPrinted(t, "a { color: #f00 }", "a {\n  color: #f00;\n}\n", "")
 	expectPrinted(t, "a { color: #f00f }", "a {\n  color: #f00f;\n}\n", "")
@@ -556,13 +673,14 @@ func TestColorHSLA(t *testing.T) {
 
 func TestLowerColor(t *testing.T) {
 	expectPrintedLower(t, "a { color: rebeccapurple }", "a {\n  color: #663399;\n}\n", "")
+	expectPrintedLower(t, "a { color: ReBeCcApUrPlE }", "a {\n  color: #663399;\n}\n", "")
 
-	expectPrintedLower(t, "a { color: #0123 }", "a {\n  color: rgba(0, 17, 34, 0.2);\n}\n", "")
+	expectPrintedLower(t, "a { color: #0123 }", "a {\n  color: rgba(0, 17, 34, .2);\n}\n", "")
 	expectPrintedLower(t, "a { color: #1230 }", "a {\n  color: rgba(17, 34, 51, 0);\n}\n", "")
-	expectPrintedLower(t, "a { color: #1234 }", "a {\n  color: rgba(17, 34, 51, 0.267);\n}\n", "")
-	expectPrintedLower(t, "a { color: #123f }", "a {\n  color: rgba(17, 34, 51, 1);\n}\n", "")
-	expectPrintedLower(t, "a { color: #12345678 }", "a {\n  color: rgba(18, 52, 86, 0.471);\n}\n", "")
-	expectPrintedLower(t, "a { color: #ff00007f }", "a {\n  color: rgba(255, 0, 0, 0.498);\n}\n", "")
+	expectPrintedLower(t, "a { color: #1234 }", "a {\n  color: rgba(17, 34, 51, .267);\n}\n", "")
+	expectPrintedLower(t, "a { color: #123f }", "a {\n  color: #112233;\n}\n", "")
+	expectPrintedLower(t, "a { color: #12345678 }", "a {\n  color: rgba(18, 52, 86, .47);\n}\n", "")
+	expectPrintedLower(t, "a { color: #ff00007f }", "a {\n  color: rgba(255, 0, 0, .498);\n}\n", "")
 
 	expectPrintedLower(t, "a { color: rgb(1 2 3) }", "a {\n  color: rgb(1, 2, 3);\n}\n", "")
 	expectPrintedLower(t, "a { color: hsl(1 2% 3%) }", "a {\n  color: hsl(1, 2%, 3%);\n}\n", "")
@@ -576,9 +694,13 @@ func TestLowerColor(t *testing.T) {
 	expectPrintedLower(t, "a { color: hsla(-200grad 2% 3%) }", "a {\n  color: hsl(-180, 2%, 3%);\n}\n", "")
 
 	expectPrintedLower(t, "a { color: rgb(1 2 3 / 4) }", "a {\n  color: rgba(1, 2, 3, 4);\n}\n", "")
+	expectPrintedLower(t, "a { color: RGB(1 2 3 / 4) }", "a {\n  color: rgba(1, 2, 3, 4);\n}\n", "")
 	expectPrintedLower(t, "a { color: rgba(1% 2% 3% / 4%) }", "a {\n  color: rgba(1%, 2%, 3%, 0.04);\n}\n", "")
+	expectPrintedLower(t, "a { color: RGBA(1% 2% 3% / 4%) }", "a {\n  color: RGBA(1%, 2%, 3%, 0.04);\n}\n", "")
 	expectPrintedLower(t, "a { color: hsl(1 2% 3% / 4) }", "a {\n  color: hsla(1, 2%, 3%, 4);\n}\n", "")
+	expectPrintedLower(t, "a { color: HSL(1 2% 3% / 4) }", "a {\n  color: hsla(1, 2%, 3%, 4);\n}\n", "")
 	expectPrintedLower(t, "a { color: hsla(1 2% 3% / 4%) }", "a {\n  color: hsla(1, 2%, 3%, 0.04);\n}\n", "")
+	expectPrintedLower(t, "a { color: HSLA(1 2% 3% / 4%) }", "a {\n  color: HSLA(1, 2%, 3%, 0.04);\n}\n", "")
 
 	expectPrintedLower(t, "a { color: rgb(1, 2, 3, 4) }", "a {\n  color: rgba(1, 2, 3, 4);\n}\n", "")
 	expectPrintedLower(t, "a { color: rgba(1%, 2%, 3%, 4%) }", "a {\n  color: rgba(1%, 2%, 3%, 0.04);\n}\n", "")
@@ -587,6 +709,170 @@ func TestLowerColor(t *testing.T) {
 	expectPrintedLower(t, "a { color: hsl(1, 2%, 3%, 4) }", "a {\n  color: hsla(1, 2%, 3%, 4);\n}\n", "")
 	expectPrintedLower(t, "a { color: hsla(1deg, 2%, 3%, 4%) }", "a {\n  color: hsla(1, 2%, 3%, 0.04);\n}\n", "")
 	expectPrintedLower(t, "a { color: hsl(1deg, 2%, 3%, 0.4%) }", "a {\n  color: hsla(1, 2%, 3%, 0.004);\n}\n", "")
+
+	expectPrintedLower(t, "a { color: hwb(90deg 20% 40%) }", "a {\n  color: #669933;\n}\n", "")
+	expectPrintedLower(t, "a { color: HWB(90deg 20% 40%) }", "a {\n  color: #669933;\n}\n", "")
+	expectPrintedLower(t, "a { color: hwb(90deg 20% 40% / 0.2) }", "a {\n  color: rgba(102, 153, 51, .2);\n}\n", "")
+	expectPrintedLower(t, "a { color: hwb(1deg 40% 80%) }", "a {\n  color: #555555;\n}\n", "")
+	expectPrintedLower(t, "a { color: hwb(1deg 9000% 50%) }", "a {\n  color: #aaaaaa;\n}\n", "")
+	expectPrintedLower(t, "a { color: hwb(1deg 9000% 50% / 0.6) }", "a {\n  color: rgba(170, 170, 170, .6);\n}\n", "")
+	expectPrintedLower(t, "a { color: hwb(90deg, 20%, 40%) }", "a {\n  color: hwb(90deg, 20%, 40%);\n}\n", "") // This is invalid
+	expectPrintedLower(t, "a { color: hwb(none 20% 40%) }", "a {\n  color: hwb(none 20% 40%);\n}\n", "")       // Interpolation
+	expectPrintedLower(t, "a { color: hwb(90deg none 40%) }", "a {\n  color: hwb(90deg none 40%);\n}\n", "")   // Interpolation
+	expectPrintedLower(t, "a { color: hwb(90deg 20% none) }", "a {\n  color: hwb(90deg 20% none);\n}\n", "")   // Interpolation
+
+	expectPrintedMangle(t, "a { color: hwb(90deg 20% 40%) }", "a {\n  color: #693;\n}\n", "")
+	expectPrintedMangle(t, "a { color: hwb(0.75turn 20% 40% / 0.75) }", "a {\n  color: #663399bf;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { color: hwb(90deg 20% 40%) }", "a {\n  color: #693;\n}\n", "")
+	expectPrintedLowerMangle(t, "a { color: hwb(0.75turn 20% 40% / 0.75) }", "a {\n  color: rgba(102, 51, 153, .75);\n}\n", "")
+}
+
+func TestBackground(t *testing.T) {
+	expectPrinted(t, "a { background: #11223344 }", "a {\n  background: #11223344;\n}\n", "")
+	expectPrintedMangle(t, "a { background: #11223344 }", "a {\n  background: #1234;\n}\n", "")
+	expectPrintedLower(t, "a { background: #11223344 }", "a {\n  background: rgba(17, 34, 51, .267);\n}\n", "")
+
+	expectPrinted(t, "a { background: border-box #11223344 }", "a {\n  background: border-box #11223344;\n}\n", "")
+	expectPrintedMangle(t, "a { background: border-box #11223344 }", "a {\n  background: border-box #1234;\n}\n", "")
+	expectPrintedLower(t, "a { background: border-box #11223344 }", "a {\n  background: border-box rgba(17, 34, 51, .267);\n}\n", "")
+}
+
+func TestGradient(t *testing.T) {
+	gradientKinds := []string{
+		"linear-gradient",
+		"radial-gradient",
+		"conic-gradient",
+		"repeating-linear-gradient",
+		"repeating-radial-gradient",
+		"repeating-conic-gradient",
+	}
+
+	for _, gradient := range gradientKinds {
+		var code string
+
+		// Different properties
+		expectPrinted(t, "a { background: "+gradient+"(red, blue) }", "a {\n  background: "+gradient+"(red, blue);\n}\n", "")
+		expectPrinted(t, "a { background-image: "+gradient+"(red, blue) }", "a {\n  background-image: "+gradient+"(red, blue);\n}\n", "")
+		expectPrinted(t, "a { border-image: "+gradient+"(red, blue) }", "a {\n  border-image: "+gradient+"(red, blue);\n}\n", "")
+		expectPrinted(t, "a { mask-image: "+gradient+"(red, blue) }", "a {\n  mask-image: "+gradient+"(red, blue);\n}\n", "")
+
+		// Basic
+		code = "a { background: " + gradient + "(yellow, #11223344) }"
+		expectPrinted(t, code, "a {\n  background: "+gradient+"(yellow, #11223344);\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background: "+gradient+"(#ff0, #1234);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(yellow,#11223344)}", "")
+		expectPrintedLowerUnsupported(t, compat.HexRGBA, code,
+			"a {\n  background: "+gradient+"(yellow, rgba(17, 34, 51, .267));\n}\n", "")
+
+		// Basic with positions
+		code = "a { background: " + gradient + "(yellow 10%, #11223344 90%) }"
+		expectPrinted(t, code, "a {\n  background: "+gradient+"(yellow 10%, #11223344 90%);\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background: "+gradient+"(#ff0 10%, #1234 90%);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(yellow 10%,#11223344 90%)}", "")
+		expectPrintedLowerUnsupported(t, compat.HexRGBA, code,
+			"a {\n  background: "+gradient+"(yellow 10%, rgba(17, 34, 51, .267) 90%);\n}\n", "")
+
+		// Basic with hints
+		code = "a { background: " + gradient + "(yellow, 25%, #11223344) }"
+		expectPrinted(t, code, "a {\n  background:\n    "+gradient+"(\n      yellow,\n      25%,\n      #11223344);\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background:\n    "+gradient+"(\n      #ff0,\n      25%,\n      #1234);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(yellow,25%,#11223344)}", "")
+		expectPrintedLowerUnsupported(t, compat.HexRGBA, code,
+			"a {\n  background:\n    "+gradient+"(\n      yellow,\n      25%,\n      rgba(17, 34, 51, .267));\n}\n", "")
+		expectPrintedLowerUnsupported(t, compat.GradientMidpoints, code,
+			"a {\n  background:\n    "+gradient+"(\n      #ffff00,\n      #f2f303de,\n      #eced04d0 6.25%,\n      "+
+				"#e1e306bd 12.5%,\n      #cdd00ba2 25%,\n      #a2a8147b,\n      #6873205d,\n      #11223344);\n}\n", "")
+
+		// Double positions
+		code = "a { background: " + gradient + "(green, red 10%, red 20%, yellow 70% 80%, black) }"
+		expectPrinted(t, code, "a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      "+
+			"red 20%,\n      yellow 70% 80%,\n      black);\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background:\n    "+gradient+"(\n      green,\n      "+
+			"red 10% 20%,\n      #ff0 70% 80%,\n      #000);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(green,red 10%,red 20%,yellow 70% 80%,black)}", "")
+		expectPrintedLowerUnsupported(t, compat.GradientDoublePosition, code,
+			"a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      red 20%,\n      "+
+				"yellow 70%,\n      yellow 80%,\n      black);\n}\n", "")
+
+		// Double positions with hints
+		code = "a { background: " + gradient + "(green, red 10%, red 20%, 30%, yellow 70% 80%, 85%, black) }"
+		expectPrinted(t, code, "a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      red 20%,\n      "+
+			"30%,\n      yellow 70% 80%,\n      85%,\n      black);\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background:\n    "+gradient+"(\n      green,\n      red 10% 20%,\n      "+
+			"30%,\n      #ff0 70% 80%,\n      85%,\n      #000);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(green,red 10%,red 20%,30%,yellow 70% 80%,85%,black)}", "")
+		expectPrintedLowerUnsupported(t, compat.GradientDoublePosition, code,
+			"a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      red 20%,\n      30%,\n      "+
+				"yellow 70%,\n      yellow 80%,\n      85%,\n      black);\n}\n", "")
+
+		// Non-double positions with hints
+		code = "a { background: " + gradient + "(green, red 10%, 1%, red 20%, black) }"
+		expectPrinted(t, code, "a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      1%,\n      "+
+			"red 20%,\n      black);\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      "+
+			"1%,\n      red 20%,\n      #000);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(green,red 10%,1%,red 20%,black)}", "")
+		expectPrintedLowerUnsupported(t, compat.GradientDoublePosition, code,
+			"a {\n  background:\n    "+gradient+"(\n      green,\n      red 10%,\n      1%,\n      red 20%,\n      black);\n}\n", "")
+
+		// Out-of-gamut colors
+		code = "a { background: " + gradient + "(yellow, color(display-p3 1 0 0)) }"
+		expectPrinted(t, code, "a {\n  background: "+gradient+"(yellow, color(display-p3 1 0 0));\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background: "+gradient+"(#ff0, color(display-p3 1 0 0));\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+"(yellow,color(display-p3 1 0 0))}", "")
+		expectPrintedLowerUnsupported(t, compat.ColorFunctions, code,
+			"a {\n  background:\n    "+gradient+"(\n      #ffff00,\n      #ffe971,\n      #ffd472 25%,\n      "+
+				"#ffab5f,\n      #ff7b45 75%,\n      #ff5e38 87.5%,\n      #ff5534,\n      #ff4c30,\n      "+
+				"#ff412c,\n      #ff0e0e);\n  "+
+				"background:\n    "+gradient+"(\n      #ffff00,\n      color(xyz 0.734 0.805 0.111),\n      "+
+				"color(xyz 0.699 0.693 0.087) 25%,\n      color(xyz 0.627 0.501 0.048),\n      "+
+				"color(xyz 0.556 0.348 0.019) 75%,\n      color(xyz 0.521 0.284 0.009) 87.5%,\n      "+
+				"color(xyz 0.512 0.27 0.006),\n      color(xyz 0.504 0.256 0.004),\n      "+
+				"color(xyz 0.495 0.242 0.002),\n      color(xyz 0.487 0.229 0));\n}\n", "")
+
+		// Whitespace
+		code = "a { background: " + gradient + "(color-mix(in lab,red,green)calc(1px)calc(2px),color-mix(in lab,blue,red)calc(98%)calc(99%)) }"
+		expectPrinted(t, code, "a {\n  background: "+gradient+
+			"(color-mix(in lab, red, green)calc(1px)calc(2px), color-mix(in lab, blue, red)calc(98%)calc(99%));\n}\n", "")
+		expectPrintedMangle(t, code, "a {\n  background: "+gradient+
+			"(color-mix(in lab, red, green) 1px 2px, color-mix(in lab, blue, red) 98% 99%);\n}\n", "")
+		expectPrintedMinify(t, code, "a{background:"+gradient+
+			"(color-mix(in lab,red,green)calc(1px)calc(2px),color-mix(in lab,blue,red)calc(98%)calc(99%))}", "")
+		expectPrintedLowerUnsupported(t, compat.GradientDoublePosition, code, "a {\n  background:\n    "+gradient+
+			"(\n      color-mix(in lab, red, green) calc(1px),\n      color-mix(in lab, red, green) calc(2px),"+
+			"\n      color-mix(in lab, blue, red) calc(98%),\n      color-mix(in lab, blue, red) calc(99%));\n}\n", "")
+		expectPrintedLowerMangle(t, code, "a {\n  background:\n    "+gradient+
+			"(\n      color-mix(in lab, red, green) 1px,\n      color-mix(in lab, red, green) 2px,"+
+			"\n      color-mix(in lab, blue, red) 98%,\n      color-mix(in lab, blue, red) 99%);\n}\n", "")
+
+		// Color space interpolation
+		expectPrintedLowerUnsupported(t, compat.GradientInterpolation,
+			"a { background: "+gradient+"(in srgb, red, green) }",
+			"a {\n  background: "+gradient+"(#ff0000, #008000);\n}\n", "")
+		expectPrintedLowerUnsupported(t, compat.GradientInterpolation,
+			"a { background: "+gradient+"(in srgb-linear, red, green) }",
+			"a {\n  background:\n    "+gradient+"(\n      #ff0000,\n      #fb1300,\n      #f81f00 6.25%,\n      "+
+				"#f02e00 12.5%,\n      #e14200 25%,\n      #bc5c00,\n      #897000 75%,\n      #637800 87.5%,\n      "+
+				"#477c00 93.75%,\n      #317e00,\n      #008000);\n}\n", "")
+		expectPrintedLowerUnsupported(t, compat.GradientInterpolation,
+			"a { background: "+gradient+"(in lab, red, green) }",
+			"a {\n  background:\n    "+gradient+"(\n      #ff0000,\n      color(xyz 0.396 0.211 0.019),\n      "+
+				"color(xyz 0.38 0.209 0.02) 6.25%,\n      color(xyz 0.35 0.205 0.02) 12.5%,\n      "+
+				"color(xyz 0.294 0.198 0.02) 25%,\n      color(xyz 0.2 0.183 0.022),\n      "+
+				"color(xyz 0.129 0.168 0.024) 75%,\n      color(xyz 0.101 0.161 0.025) 87.5%,\n      "+
+				"color(xyz 0.089 0.158 0.025) 93.75%,\n      color(xyz 0.083 0.156 0.025),\n      #008000);\n}\n", "")
+
+		// Hue interpolation
+		expectPrintedLowerUnsupported(t, compat.GradientInterpolation,
+			"a { background: "+gradient+"(in hsl shorter hue, red, green) }",
+			"a {\n  background:\n    "+gradient+"(\n      #ff0000,\n      #df7000,\n      "+
+				"#bfbf00,\n      #50a000,\n      #008000);\n}\n", "")
+		expectPrintedLowerUnsupported(t, compat.GradientInterpolation,
+			"a { background: "+gradient+"(in hsl longer hue, red, green) }",
+			"a {\n  background:\n    "+gradient+"(\n      #ff0000,\n      #ef0078,\n      "+
+				"#df00df,\n      #6800cf,\n      #0000c0,\n      #0058b0,\n      "+
+				"#00a0a0,\n      #009048,\n      #008000);\n}\n", "")
+	}
 }
 
 func TestDeclaration(t *testing.T) {
@@ -595,16 +881,12 @@ func TestDeclaration(t *testing.T) {
 	expectPrinted(t, ".decl { a: b; }", ".decl {\n  a: b;\n}\n", "")
 	expectPrinted(t, ".decl { a: b; c: d }", ".decl {\n  a: b;\n  c: d;\n}\n", "")
 	expectPrinted(t, ".decl { a: b; c: d; }", ".decl {\n  a: b;\n  c: d;\n}\n", "")
-	expectPrinted(t, ".decl { a { b: c; } }", ".decl {\n  a { b: c; };\n}\n",
-		"<stdin>: WARNING: A nested style rule cannot start with \"a\" because it looks like the start of a declaration\n"+
-			"NOTE: To start a nested style rule with an identifier, you need to wrap the identifier in \":is(...)\" to prevent the rule from being parsed as a declaration.\n")
+	expectPrinted(t, ".decl { a { b: c; } }", ".decl {\n  a {\n    b: c;\n  }\n}\n", "")
 	expectPrinted(t, ".decl { & a { b: c; } }", ".decl {\n  & a {\n    b: c;\n  }\n}\n", "")
 
 	// See http://browserhacks.com/
-	expectPrinted(t, ".selector { (;property: value;); }", ".selector {\n  (;property: value;);\n}\n",
-		"<stdin>: WARNING: Expected identifier but found \"(\"\n")
-	expectPrinted(t, ".selector { [;property: value;]; }", ".selector {\n  [;property: value;];\n}\n",
-		"<stdin>: WARNING: Expected identifier but found \";\"\n") // Note: This now overlaps with CSS nesting syntax
+	expectPrinted(t, ".selector { (;property: value;); }", ".selector {\n  (;property: value;);\n}\n", "<stdin>: WARNING: Expected identifier but found \"(\"\n")
+	expectPrinted(t, ".selector { [;property: value;]; }", ".selector {\n  [;property: value;];\n}\n", "<stdin>: WARNING: Expected identifier but found \"[\"\n")
 	expectPrinted(t, ".selector, {}", ".selector, {\n}\n", "<stdin>: WARNING: Unexpected \"{\"\n")
 	expectPrinted(t, ".selector\\ {}", ".selector\\  {\n}\n", "")
 	expectPrinted(t, ".selector { property: value\\9; }", ".selector {\n  property: value\\\t;\n}\n", "")
@@ -786,10 +1068,8 @@ func TestNestedSelector(t *testing.T) {
 	expectPrinted(t, "a { >b {} }", "a {\n  > b {\n  }\n}\n", "")
 	expectPrinted(t, "a { +b {} }", "a {\n  + b {\n  }\n}\n", "")
 	expectPrinted(t, "a { ~b {} }", "a {\n  ~ b {\n  }\n}\n", "")
-	expectPrinted(t, "a { b {} }", "a {\n  b {};\n}\n",
-		"<stdin>: WARNING: A nested style rule cannot start with \"b\" because it looks like the start of a declaration\n"+
-			"NOTE: To start a nested style rule with an identifier, you need to wrap the identifier in \":is(...)\" to prevent the rule from being parsed as a declaration.\n")
-	expectPrinted(t, "a { b() {} }", "a {\n  b() {};\n}\n", "<stdin>: WARNING: Expected identifier but found \"b(\"\n")
+	expectPrinted(t, "a { b {} }", "a {\n  b {\n  }\n}\n", "")
+	expectPrinted(t, "a { b() {} }", "a {\n  b() {\n  }\n}\n", "<stdin>: WARNING: Unexpected \"b(\"\n")
 
 	// Note: CSS nesting no longer requires each complex selector to contain "&"
 	expectPrinted(t, "a { & b, c {} }", "a {\n  & b,\n  c {\n  }\n}\n", "")
@@ -933,6 +1213,8 @@ func TestNestedSelector(t *testing.T) {
 	expectPrintedLowerUnsupported(t, nesting, ".foo, .bar:before { :hover & { color: red } }", ":hover .foo {\n  color: red;\n}\n", "")
 	expectPrintedLowerUnsupported(t, nesting, ".bar:before { &:hover { color: red } }", ":is():hover {\n  color: red;\n}\n", "")
 	expectPrintedLowerUnsupported(t, nesting, ".bar:before { :hover & { color: red } }", ":hover :is() {\n  color: red;\n}\n", "")
+	expectPrintedLowerUnsupported(t, nesting, ".foo { &:after, & .bar { color: red } }", ".foo:after,\n.foo .bar {\n  color: red;\n}\n", "")
+	expectPrintedLowerUnsupported(t, nesting, ".foo { & .bar, &:after { color: red } }", ".foo .bar,\n.foo:after {\n  color: red;\n}\n", "")
 	expectPrintedLowerUnsupported(t, nesting, ".xy { :where(&.foo) { color: red } }", ":where(.xy.foo) {\n  color: red;\n}\n", "")
 	expectPrintedLowerUnsupported(t, nesting, "div { :where(&.foo) { color: red } }", ":where(div.foo) {\n  color: red;\n}\n", "")
 	expectPrintedLowerUnsupported(t, nesting, ".xy { :where(.foo&) { color: red } }", ":where(.xy.foo) {\n  color: red;\n}\n", "")
@@ -1028,20 +1310,23 @@ func TestNestedSelector(t *testing.T) {
 		"@supports (selector(&)) {\n  .card:hover {\n    color: red;\n  }\n}\n", "")
 	expectPrintedLower(t, "html { @layer base { color: blue; @layer support { & body { color: red } } } }",
 		"@layer base {\n  html {\n    color: blue;\n  }\n  @layer support {\n    html body {\n      color: red;\n    }\n  }\n}\n", "")
+
+	// https://github.com/w3c/csswg-drafts/issues/7961#issuecomment-1549874958
+	expectPrinted(t, "@media screen { a { x: y } x: y; b { x: y } }", "@media screen {\n  a {\n    x: y;\n  }\n  x: y;\n  b {\n    x: y;\n  }\n}\n", "")
+	expectPrinted(t, ":root { @media screen { a { x: y } x: y; b { x: y } } }", ":root {\n  @media screen {\n    a {\n      x: y;\n    }\n    x: y;\n    b {\n      x: y;\n    }\n  }\n}\n", "")
 }
 
 func TestBadQualifiedRules(t *testing.T) {
 	expectPrinted(t, "$bad: rule;", "$bad: rule; {\n}\n", "<stdin>: WARNING: Unexpected \"$\"\n")
 	expectPrinted(t, "$bad: rule; div { color: red }", "$bad: rule; div {\n  color: red;\n}\n", "<stdin>: WARNING: Unexpected \"$\"\n")
 	expectPrinted(t, "$bad { color: red }", "$bad {\n  color: red;\n}\n", "<stdin>: WARNING: Unexpected \"$\"\n")
-	expectPrinted(t, "a { div.major { color: blue } color: red }", "a {\n  div.major { color: blue } color: red;\n}\n",
-		"<stdin>: WARNING: A nested style rule cannot start with \"div\" because it looks like the start of a declaration\n"+
-			"NOTE: To start a nested style rule with an identifier, you need to wrap the identifier in \":is(...)\" to prevent the rule from being parsed as a declaration.\n")
-	expectPrinted(t, "a { div:hover { color: blue } color: red }", "a {\n  div: hover { color: blue } color: red;\n}\n", "")
-	expectPrinted(t, "a { div:hover { color: blue }; color: red }", "a {\n  div: hover { color: blue };\n  color: red;\n}\n", "")
-	expectPrinted(t, "a { div:hover { color: blue } ; color: red }", "a {\n  div: hover { color: blue };\n  color: red;\n}\n", "")
-	expectPrinted(t, "! { x: {} }", "! {\n  x: {};\n}\n", "<stdin>: WARNING: Unexpected \"!\"\n")
-	expectPrinted(t, "a { *width: 100%; height: 1px }", "a {\n  *width: 100%;\n  height: 1px;\n}\n", "<stdin>: WARNING: Unexpected \"width\"\n")
+	expectPrinted(t, "a { div.major { color: blue } color: red }", "a {\n  div.major {\n    color: blue;\n  }\n  color: red;\n}\n", "")
+	expectPrinted(t, "a { div:hover { color: blue } color: red }", "a {\n  div:hover {\n    color: blue;\n  }\n  color: red;\n}\n", "")
+	expectPrinted(t, "a { div:hover { color: blue }; color: red }", "a {\n  div:hover {\n    color: blue;\n  }\n  color: red;\n}\n", "")
+	expectPrinted(t, "a { div:hover { color: blue } ; color: red }", "a {\n  div:hover {\n    color: blue;\n  }\n  color: red;\n}\n", "")
+	expectPrinted(t, "! { x: y; }", "! {\n  x: y;\n}\n", "<stdin>: WARNING: Unexpected \"!\"\n")
+	expectPrinted(t, "! { x: {} }", "! {\n  x: {\n  }\n}\n", "<stdin>: WARNING: Unexpected \"!\"\n<stdin>: WARNING: Expected identifier but found whitespace\n")
+	expectPrinted(t, "a { *width: 100%; height: 1px }", "a {\n  *width: 100%;\n  height: 1px;\n}\n", "<stdin>: WARNING: Expected identifier but found \"*\"\n")
 	expectPrinted(t, "a { garbage; height: 1px }", "a {\n  garbage;\n  height: 1px;\n}\n", "<stdin>: WARNING: Expected \":\"\n")
 	expectPrinted(t, "a { !; height: 1px }", "a {\n  !;\n  height: 1px;\n}\n", "<stdin>: WARNING: Expected identifier but found \"!\"\n")
 }
@@ -1254,6 +1539,14 @@ func TestAtRule(t *testing.T) {
   }
 }
 `, "")
+
+	// https://drafts.csswg.org/css-anchor-position-1/#at-ruledef-position-try
+	expectPrinted(t, `@position-try --foo { top: 0 }`,
+		`@position-try --foo {
+  top: 0;
+}
+`, "")
+	expectPrintedMinify(t, `@position-try --foo { top: 0; }`, `@position-try --foo{top:0}`, "")
 }
 
 func TestAtCharset(t *testing.T) {
@@ -1279,18 +1572,22 @@ func TestAtImport(t *testing.T) {
 	expectPrinted(t, "@import url();", "@import \"\";\n", "")
 	expectPrinted(t, "@import url(foo.css);", "@import \"foo.css\";\n", "")
 	expectPrinted(t, "@import url(foo.css) ;", "@import \"foo.css\";\n", "")
+	expectPrinted(t, "@import url( foo.css );", "@import \"foo.css\";\n", "")
 	expectPrinted(t, "@import url(\"foo.css\");", "@import \"foo.css\";\n", "")
 	expectPrinted(t, "@import url(\"foo.css\") ;", "@import \"foo.css\";\n", "")
+	expectPrinted(t, "@import url( \"foo.css\" );", "@import \"foo.css\";\n", "")
 	expectPrinted(t, "@import url(\"foo.css\") print;", "@import \"foo.css\" print;\n", "")
 	expectPrinted(t, "@import url(\"foo.css\") screen and (orientation:landscape);", "@import \"foo.css\" screen and (orientation:landscape);\n", "")
 
 	expectPrinted(t, "@import;", "@import;\n", "<stdin>: WARNING: Expected URL token but found \";\"\n")
 	expectPrinted(t, "@import ;", "@import;\n", "<stdin>: WARNING: Expected URL token but found \";\"\n")
 	expectPrinted(t, "@import \"foo.css\"", "@import \"foo.css\";\n", "<stdin>: WARNING: Expected \";\" but found end of file\n")
-	expectPrinted(t, "@import url(\"foo.css\";", "@import url(foo.css);\n", "<stdin>: WARNING: Expected \")\" to go with \"(\"\n<stdin>: NOTE: The unbalanced \"(\" is here:\n")
+	expectPrinted(t, "@import url(\"foo.css\" extra-stuff);", "@import url(\"foo.css\" extra-stuff);\n", "<stdin>: WARNING: Expected URL token but found \"url(\"\n")
+	expectPrinted(t, "@import url(\"foo.css\";", "@import url(\"foo.css\";);\n",
+		"<stdin>: WARNING: Expected URL token but found \"url(\"\n<stdin>: WARNING: Expected \")\" to go with \"(\"\n<stdin>: NOTE: The unbalanced \"(\" is here:\n")
 	expectPrinted(t, "@import noturl(\"foo.css\");", "@import noturl(\"foo.css\");\n", "<stdin>: WARNING: Expected URL token but found \"noturl(\"\n")
-	expectPrinted(t, "@import url(", "@import url(;\n", `<stdin>: WARNING: Expected URL token but found bad URL token
-<stdin>: ERROR: Expected ")" to end URL token
+	expectPrinted(t, "@import url(foo.css", "@import \"foo.css\";\n", `<stdin>: WARNING: Expected ")" to end URL token
+<stdin>: NOTE: The unbalanced "(" is here:
 <stdin>: WARNING: Expected ";" but found end of file
 `)
 
@@ -1337,6 +1634,16 @@ func TestAtKeyframes(t *testing.T) {
 	// them silently breaking in Chrome.
 	expectPrinted(t, "@keyframes 'name' {}", "@keyframes name {\n}\n", "")
 	expectPrinted(t, "@keyframes 'name 2' {}", "@keyframes name\\ 2 {\n}\n", "")
+	expectPrinted(t, "@keyframes 'none' {}", "@keyframes \"none\" {}\n", "")
+	expectPrinted(t, "@keyframes 'None' {}", "@keyframes \"None\" {}\n", "")
+	expectPrinted(t, "@keyframes 'unset' {}", "@keyframes \"unset\" {}\n", "")
+	expectPrinted(t, "@keyframes 'revert' {}", "@keyframes \"revert\" {}\n", "")
+	expectPrinted(t, "@keyframes None {}", "@keyframes None {}\n",
+		"<stdin>: WARNING: Cannot use \"None\" as a name for \"@keyframes\" without quotes\n"+
+			"NOTE: You can put \"None\" in quotes to prevent it from becoming a CSS keyword.\n")
+	expectPrinted(t, "@keyframes REVERT {}", "@keyframes REVERT {}\n",
+		"<stdin>: WARNING: Cannot use \"REVERT\" as a name for \"@keyframes\" without quotes\n"+
+			"NOTE: You can put \"REVERT\" in quotes to prevent it from becoming a CSS keyword.\n")
 
 	expectPrinted(t, "@keyframes name { from { color: red } }", "@keyframes name {\n  from {\n    color: red;\n  }\n}\n", "")
 	expectPrinted(t, "@keyframes name { 100% { color: red } }", "@keyframes name {\n  100% {\n    color: red;\n  }\n}\n", "")
@@ -1383,6 +1690,12 @@ func TestAnimationName(t *testing.T) {
 	// them silently breaking in Chrome.
 	expectPrinted(t, "div { animation-name: 'name' }", "div {\n  animation-name: name;\n}\n", "")
 	expectPrinted(t, "div { animation-name: 'name 2' }", "div {\n  animation-name: name\\ 2;\n}\n", "")
+	expectPrinted(t, "div { animation-name: 'none' }", "div {\n  animation-name: \"none\";\n}\n", "")
+	expectPrinted(t, "div { animation-name: 'None' }", "div {\n  animation-name: \"None\";\n}\n", "")
+	expectPrinted(t, "div { animation-name: 'unset' }", "div {\n  animation-name: \"unset\";\n}\n", "")
+	expectPrinted(t, "div { animation-name: 'revert' }", "div {\n  animation-name: \"revert\";\n}\n", "")
+	expectPrinted(t, "div { animation-name: none }", "div {\n  animation-name: none;\n}\n", "")
+	expectPrinted(t, "div { animation-name: unset }", "div {\n  animation-name: unset;\n}\n", "")
 	expectPrinted(t, "div { animation: 2s linear 'name 2', 3s infinite 'name 3' }", "div {\n  animation: 2s linear name\\ 2, 3s infinite name\\ 3;\n}\n", "")
 }
 
@@ -1894,7 +2207,8 @@ func TestTransform(t *testing.T) {
 	expectPrintedMangle(t, "a { transform: matrix(1, 0, 0, 2, 0, 0) }", "a {\n  transform: scaleY(2);\n}\n", "")
 	expectPrintedMangle(t, "a { transform: matrix(2, 0, 0, 3, 0, 0) }", "a {\n  transform: scale(2, 3);\n}\n", "")
 	expectPrintedMangle(t, "a { transform: matrix(2, 0, 0, 2, 0, 0) }", "a {\n  transform: scale(2);\n}\n", "")
-	expectPrintedMangle(t, "a { transform: matrix(1, 0, 0, 1, 1, 2) }", "a {\n  transform: matrix(1, 0, 0, 1, 1, 2);\n}\n", "")
+	expectPrintedMangle(t, "a { transform: matrix(1, 0, 0, 1, 1, 2) }",
+		"a {\n  transform:\n    matrix(\n      1, 0,\n      0, 1,\n      1, 2);\n}\n", "")
 
 	expectPrintedMangle(t, "a { transform: translate(0, 0) }", "a {\n  transform: translate(0);\n}\n", "")
 	expectPrintedMangle(t, "a { transform: translate(0px, 0px) }", "a {\n  transform: translate(0);\n}\n", "")
@@ -1967,13 +2281,13 @@ func TestTransform(t *testing.T) {
 
 	expectPrintedMangle(t,
 		"a { transform: matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2) }",
-		"a {\n  transform: matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2);\n}\n", "")
+		"a {\n  transform:\n    matrix3d(\n      1, 0, 0, 0,\n      0, 1, 0, 0,\n      0, 0, 1, 0,\n      0, 0, 0, 2);\n}\n", "")
 	expectPrintedMangle(t,
 		"a { transform: matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1) }",
-		"a {\n  transform: matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 2, 3, 4, 1);\n}\n", "")
+		"a {\n  transform:\n    matrix3d(\n      1, 0, 0, 0,\n      0, 1, 0, 0,\n      0, 0, 1, 0,\n      2, 3, 4, 1);\n}\n", "")
 	expectPrintedMangle(t,
 		"a { transform: matrix3d(1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1) }",
-		"a {\n  transform: matrix3d(1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1);\n}\n", "")
+		"a {\n  transform:\n    matrix3d(\n      1, 0, 1, 0,\n      0, 1, 0, 0,\n      1, 0, 1, 0,\n      0, 0, 0, 1);\n}\n", "")
 	expectPrintedMangle(t,
 		"a { transform: matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1) }",
 		"a {\n  transform: scaleZ(1);\n}\n", "")
@@ -1997,7 +2311,7 @@ func TestTransform(t *testing.T) {
 		"a {\n  transform: scale3d(1, 2, 3);\n}\n", "")
 	expectPrintedMangle(t,
 		"a { transform: matrix3d(2, 3, 0, 0, 4, 5, 0, 0, 0, 0, 1, 0, 6, 7, 0, 1) }",
-		"a {\n  transform: matrix3d(2, 3, 0, 0, 4, 5, 0, 0, 0, 0, 1, 0, 6, 7, 0, 1);\n}\n", "")
+		"a {\n  transform:\n    matrix3d(\n      2, 3, 0, 0,\n      4, 5, 0, 0,\n      0, 0, 1, 0,\n      6, 7, 0, 1);\n}\n", "")
 
 	expectPrintedMangle(t, "a { transform: translate3d(0, 0, 0) }", "a {\n  transform: translateZ(0);\n}\n", "")
 	expectPrintedMangle(t, "a { transform: translate3d(0%, 0%, 0) }", "a {\n  transform: translateZ(0);\n}\n", "")
@@ -2130,6 +2444,17 @@ func TestMangleDuplicateSelectorRules(t *testing.T) {
 	expectPrintedMangle(t, "c { color: green } a { color: red } /*!x*/ /*!y*/ a { color: red }", "c {\n  color: green;\n}\na {\n  color: red;\n}\n/*!x*/\n/*!y*/\n", "")
 }
 
+func TestMangleAtMedia(t *testing.T) {
+	expectPrinted(t, "@media screen { @media screen { a { color: red } } }", "@media screen {\n  @media screen {\n    a {\n      color: red;\n    }\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { @media screen { a { color: red } } }", "@media screen {\n  a {\n    color: red;\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { @media not print { a { color: red } } }", "@media screen {\n  @media not print {\n    a {\n      color: red;\n    }\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { @media not print { @media screen { a { color: red } } } }", "@media screen {\n  @media not print {\n    a {\n      color: red;\n    }\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { a { color: red } @media screen { a { color: red } } }", "@media screen {\n  a {\n    color: red;\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { a { color: red } @media screen { a { color: blue } } }", "@media screen {\n  a {\n    color: red;\n  }\n  a {\n    color: #00f;\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { .a { color: red; @media screen { .b { color: blue } } } }", "@media screen {\n  .a {\n    color: red;\n    .b {\n      color: #00f;\n    }\n  }\n}\n", "")
+	expectPrintedMangle(t, "@media screen { a { color: red } } @media screen { b { color: red } }", "@media screen {\n  a {\n    color: red;\n  }\n}\n@media screen {\n  b {\n    color: red;\n  }\n}\n", "")
+}
+
 func TestFontWeight(t *testing.T) {
 	expectPrintedMangle(t, "a { font-weight: normal }", "a {\n  font-weight: 400;\n}\n", "")
 	expectPrintedMangle(t, "a { font-weight: bold }", "a {\n  font-weight: 700;\n}\n", "")
@@ -2186,6 +2511,14 @@ func TestFont(t *testing.T) {
 
 	expectPrintedMangleMinify(t, "a { font: italic small-caps bold ultra-condensed 1rem/1.2 'aaa bbb' }", "a{font:italic small-caps 700 ultra-condensed 1rem/1.2 aaa bbb}", "")
 	expectPrintedMangleMinify(t, "a { font: italic small-caps bold ultra-condensed 1rem / 1.2 'aaa bbb' }", "a{font:italic small-caps 700 ultra-condensed 1rem/1.2 aaa bbb}", "")
+
+	// See: https://github.com/evanw/esbuild/issues/3452
+	expectPrinted(t, "a { font: 10px'foo' }", "a {\n  font: 10px\"foo\";\n}\n", "")
+	expectPrinted(t, "a { font: 10px'123' }", "a {\n  font: 10px\"123\";\n}\n", "")
+	expectPrintedMangle(t, "a { font: 10px'foo' }", "a {\n  font: 10px foo;\n}\n", "")
+	expectPrintedMangle(t, "a { font: 10px'123' }", "a {\n  font: 10px\"123\";\n}\n", "")
+	expectPrintedMangleMinify(t, "a { font: 10px'foo' }", "a{font:10px foo}", "")
+	expectPrintedMangleMinify(t, "a { font: 10px'123' }", "a{font:10px\"123\"}", "")
 }
 
 func TestWarningUnexpectedCloseBrace(t *testing.T) {
@@ -2219,13 +2552,18 @@ func TestParseErrorRecovery(t *testing.T) {
 	expectPrinted(t, "x { y: z", "x {\n  y: z;\n}\n", "<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
 	expectPrinted(t, "x { y: (", "x {\n  y: ();\n}\n", "<stdin>: WARNING: Expected \")\" to go with \"(\"\n<stdin>: NOTE: The unbalanced \"(\" is here:\n")
 	expectPrinted(t, "x { y: [", "x {\n  y: [];\n}\n", "<stdin>: WARNING: Expected \"]\" to go with \"[\"\n<stdin>: NOTE: The unbalanced \"[\" is here:\n")
-	expectPrinted(t, "x { y: {", "x {\n  y: {};\n}\n", "<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
+	expectPrinted(t, "x { y: {", "x {\n  y: {\n  }\n}\n",
+		"<stdin>: WARNING: Expected identifier but found whitespace\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
 	expectPrinted(t, "x { y: z(", "x {\n  y: z();\n}\n", "<stdin>: WARNING: Expected \")\" to go with \"(\"\n<stdin>: NOTE: The unbalanced \"(\" is here:\n")
 	expectPrinted(t, "x { y: z(abc", "x {\n  y: z(abc);\n}\n", "<stdin>: WARNING: Expected \")\" to go with \"(\"\n<stdin>: NOTE: The unbalanced \"(\" is here:\n")
-	expectPrinted(t, "x { y: url(", "x {\n  y: url(;\n}\n",
-		"<stdin>: ERROR: Expected \")\" to end URL token\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
-	expectPrinted(t, "x { y: url(abc", "x {\n  y: url(abc;\n}\n",
-		"<stdin>: ERROR: Expected \")\" to end URL token\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
+	expectPrinted(t, "x { y: url(", "x {\n  y: url();\n}\n",
+		"<stdin>: WARNING: Expected \")\" to end URL token\n<stdin>: NOTE: The unbalanced \"(\" is here:\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
+	expectPrinted(t, "x { y: url(abc", "x {\n  y: url(abc);\n}\n",
+		"<stdin>: WARNING: Expected \")\" to end URL token\n<stdin>: NOTE: The unbalanced \"(\" is here:\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
+	expectPrinted(t, "x { y: url(; }", "x {\n  y: url(; };\n}\n",
+		"<stdin>: WARNING: Expected \")\" to end URL token\n<stdin>: NOTE: The unbalanced \"(\" is here:\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
+	expectPrinted(t, "x { y: url(abc;", "x {\n  y: url(abc;);\n}\n",
+		"<stdin>: WARNING: Expected \")\" to end URL token\n<stdin>: NOTE: The unbalanced \"(\" is here:\n<stdin>: WARNING: Expected \"}\" to go with \"{\"\n<stdin>: NOTE: The unbalanced \"{\" is here:\n")
 	expectPrinted(t, "/* @license */ x {} /* @preserve", "/* @license */\nx {\n}\n",
 		"<stdin>: ERROR: Expected \"*/\" to terminate multi-line comment\n<stdin>: NOTE: The multi-line comment starts here:\n")
 	expectPrinted(t, "a { b: c; d: 'e\n f: g; h: i }", "a {\n  b: c;\n  d: 'e\n  f: g;\n  h: i;\n}\n", "<stdin>: WARNING: Unterminated string token\n")
@@ -2273,6 +2611,10 @@ func TestPrefixInsertion(t *testing.T) {
 			"a {\n  -webkit-"+key+": url(x.png);\n  "+key+": url(y.png);\n}\n", "")
 
 		expectPrintedWithAllPrefixes(t,
+			"a {\n  "+key+": url(y.png);\n  -webkit-"+key+": url(x.png);\n}\n",
+			"a {\n  "+key+": url(y.png);\n  -webkit-"+key+": url(x.png);\n}\n", "")
+
+		expectPrintedWithAllPrefixes(t,
 			"a { "+key+": url(x.png); "+key+": url(y.png) }",
 			"a {\n  -webkit-"+key+": url(x.png);\n  "+key+": url(x.png);\n  -webkit-"+key+": url(y.png);\n  "+key+": url(y.png);\n}\n", "")
 	}
@@ -2291,6 +2633,8 @@ func TestPrefixInsertion(t *testing.T) {
 	expectPrintedWithAllPrefixes(t, "a { text-decoration-line: none }", "a {\n  -webkit-text-decoration-line: none;\n  -moz-text-decoration-line: none;\n  text-decoration-line: none;\n}\n", "")
 	expectPrintedWithAllPrefixes(t, "a { text-size-adjust: none }", "a {\n  -webkit-text-size-adjust: none;\n  -ms-text-size-adjust: none;\n  text-size-adjust: none;\n}\n", "")
 	expectPrintedWithAllPrefixes(t, "a { user-select: none }", "a {\n  -webkit-user-select: none;\n  -khtml-user-select: none;\n  -moz-user-select: -moz-none;\n  -ms-user-select: none;\n  user-select: none;\n}\n", "")
+	expectPrintedWithAllPrefixes(t, "a { mask-composite: add, subtract, intersect, exclude }",
+		"a {\n  -webkit-mask-composite:\n    source-over,\n    source-out,\n    source-in,\n    xor;\n  mask-composite:\n    add,\n    subtract,\n    intersect,\n    exclude;\n}\n", "")
 
 	// Check that we insert prefixed rules each time an unprefixed rule is
 	// encountered. This matches the behavior of the popular "autoprefixer" tool.
@@ -2408,4 +2752,32 @@ func TestNthChild(t *testing.T) {
 			"<stdin>: WARNING: Expected \")\" to go with \"(\"\n<stdin>: NOTE: The unbalanced \"(\" is here:\n")
 		expectPrinted(t, ":"+nth+"(+2n + 1) {}", ":"+nth+"(2n+1) {\n}\n", "")
 	}
+}
+
+func TestComposes(t *testing.T) {
+	expectPrinted(t, ".foo { composes: bar; color: red }", ".foo {\n  composes: bar;\n  color: red;\n}\n", "")
+	expectPrinted(t, ".foo .bar { composes: bar; color: red }", ".foo .bar {\n  composes: bar;\n  color: red;\n}\n", "")
+	expectPrinted(t, ".foo, .bar { composes: bar; color: red }", ".foo,\n.bar {\n  composes: bar;\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { composes: bar; color: red }", ".foo {\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { composes: bar baz; color: red }", ".foo {\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { composes: bar from global; color: red }", ".foo {\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { composes: bar from \"file.css\"; color: red }", ".foo {\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { composes: bar from url(file.css); color: red }", ".foo {\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { & { composes: bar; color: red } }", ".foo {\n  & {\n    color: red;\n  }\n}\n", "")
+	expectPrintedLocal(t, ".foo { :local { composes: bar; color: red } }", ".foo {\n  color: red;\n}\n", "")
+	expectPrintedLocal(t, ".foo { :global { composes: bar; color: red } }", ".foo {\n  color: red;\n}\n", "")
+
+	expectPrinted(t, ".foo, .bar { composes: bar from github }", ".foo,\n.bar {\n  composes: bar from github;\n}\n", "")
+	expectPrintedLocal(t, ".foo { composes: bar from github }", ".foo {\n}\n", "<stdin>: WARNING: \"composes\" declaration uses invalid location \"github\"\n")
+
+	badComposes := "<stdin>: WARNING: \"composes\" only works inside single class selectors\n" +
+		"<stdin>: NOTE: The parent selector is not a single class selector because of the syntax here:\n"
+	expectPrintedLocal(t, "& { composes: bar; color: red }", "& {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo& { composes: bar; color: red }", "&.foo {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo.bar { composes: bar; color: red }", ".foo.bar {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo:hover { composes: bar; color: red }", ".foo:hover {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo[href] { composes: bar; color: red }", ".foo[href] {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo .bar { composes: bar; color: red }", ".foo .bar {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo, div { composes: bar; color: red }", ".foo,\ndiv {\n  color: red;\n}\n", badComposes)
+	expectPrintedLocal(t, ".foo { .bar { composes: foo; color: red } }", ".foo {\n  .bar {\n    color: red;\n  }\n}\n", badComposes)
 }

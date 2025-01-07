@@ -50,7 +50,7 @@ type apiHandler struct {
 	fallback         string
 	serveWaitGroup   sync.WaitGroup
 	activeStreams    []chan serverSentEvent
-	buildSummary     buildSummary
+	currentHashes    map[string]string
 	mutex            sync.Mutex
 }
 
@@ -113,7 +113,7 @@ func (h *apiHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	maybeWriteResponseBody := func(bytes []byte) { res.Write(bytes) }
 	isHEAD := req.Method == "HEAD"
 	if isHEAD {
-		maybeWriteResponseBody = func(bytes []byte) { res.Write(nil) }
+		maybeWriteResponseBody = func([]byte) { res.Write(nil) }
 	}
 
 	// Handle GET and HEAD requests
@@ -322,6 +322,22 @@ func (h *apiHandler) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 		}
 	}
 
+	// Satisfy requests for "favicon.ico" to avoid errors in Firefox developer tools
+	if req.Method == "GET" && req.URL.Path == "/favicon.ico" {
+		for _, encoding := range strings.Split(req.Header.Get("Accept-Encoding"), ",") {
+			if semi := strings.IndexByte(encoding, ';'); semi >= 0 {
+				encoding = encoding[:semi]
+			}
+			if strings.TrimSpace(encoding) == "gzip" {
+				res.Header().Set("Content-Encoding", "gzip")
+				res.Header().Set("Content-Type", "image/vnd.microsoft.icon")
+				go h.notifyRequest(time.Since(start), req, http.StatusOK)
+				maybeWriteResponseBody(favicon_ico_gz)
+				return
+			}
+		}
+	}
+
 	// Default to a 404
 	res.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	go h.notifyRequest(time.Since(start), req, http.StatusNotFound)
@@ -405,7 +421,7 @@ func (h *apiHandler) serveEventStream(start time.Time, req *http.Request, res ht
 	res.Write([]byte("500 - Event stream error"))
 }
 
-func (h *apiHandler) broadcastBuildResult(result BuildResult, newSummary buildSummary) {
+func (h *apiHandler) broadcastBuildResult(result BuildResult, newHashes map[string]string) {
 	h.mutex.Lock()
 
 	var added []string
@@ -429,11 +445,11 @@ func (h *apiHandler) broadcastBuildResult(result BuildResult, newSummary buildSu
 	// Diff the old and new states, but only if the build succeeded. We shouldn't
 	// make it appear as if all files were removed when there is a build error.
 	if len(result.Errors) == 0 {
-		oldSummary := h.buildSummary
-		h.buildSummary = newSummary
+		oldHashes := h.currentHashes
+		h.currentHashes = newHashes
 
-		for absPath, newHash := range newSummary {
-			if oldHash, ok := oldSummary[absPath]; !ok {
+		for absPath, newHash := range newHashes {
+			if oldHash, ok := oldHashes[absPath]; !ok {
 				if url, ok := urlForPath(absPath); ok {
 					added = append(added, url)
 				}
@@ -444,8 +460,8 @@ func (h *apiHandler) broadcastBuildResult(result BuildResult, newSummary buildSu
 			}
 		}
 
-		for absPath := range oldSummary {
-			if _, ok := newSummary[absPath]; !ok {
+		for absPath := range oldHashes {
+			if _, ok := newHashes[absPath]; !ok {
 				if url, ok := urlForPath(absPath); ok {
 					removed = append(removed, url)
 				}

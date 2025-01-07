@@ -53,10 +53,12 @@ export const jsFeatures = {
   ExportStarAs: true,
   ForAwait: true,
   ForOf: true,
+  FunctionNameConfigurable: true,
   FunctionOrClassPropertyAccess: true,
   Generator: true,
   Hashbang: true,
   ImportAssertions: true,
+  ImportAttributes: true,
   ImportMeta: true,
   InlineScript: true,
   LogicalAssignment: true,
@@ -87,7 +89,12 @@ export const jsFeatures = {
 
 export type CSSFeature = keyof typeof cssFeatures
 export const cssFeatures = {
+  ColorFunctions: true,
+  GradientDoublePosition: true,
+  GradientInterpolation: true,
+  GradientMidpoints: true,
   HexRGBA: true,
+  HWB: true,
   InlineStyle: true,
   InsetProperty: true,
   IsPseudoClass: true,
@@ -106,6 +113,7 @@ export const cssProperties = {
   DFontKerning: true,
   DHyphens: true,
   DInitialLetter: true,
+  DMaskComposite: true,
   DMaskImage: true,
   DMaskOrigin: true,
   DMaskPosition: true,
@@ -128,7 +136,7 @@ export const cssProperties = {
 export interface Support {
   force?: boolean
   passed?: number
-  failed?: number
+  failed?: Set<string>
 }
 
 export interface VersionRange {
@@ -144,6 +152,7 @@ export interface PrefixData {
 
 export type SupportMap<F extends string> = Record<F, Partial<Record<Engine, Record<string, Support>>>>
 export type VersionRangeMap<F extends string> = Partial<Record<F, Partial<Record<Engine, VersionRange[]>>>>
+export type WhyNotMap<F extends string> = Partial<Record<F, Partial<Record<Engine, string[]>>>>
 export type CSSPrefixMap = Partial<Record<CSSProperty, PrefixData[]>>
 
 const compareVersions = (a: number[], b: number[]): number => {
@@ -186,12 +195,14 @@ const mergePrefixMaps = (to: CSSPrefixMap, from: CSSPrefixMap): void => {
   }
 }
 
-const supportMapToVersionRanges = <F extends string>(supportMap: SupportMap<F>): VersionRangeMap<F> => {
+const supportMapToVersionRanges = <F extends string>(supportMap: SupportMap<F>): [VersionRangeMap<F>, WhyNotMap<F>] => {
   const versionRangeMap: VersionRangeMap<F> = {}
+  const whyNotMap: WhyNotMap<F> = {}
 
   for (const feature in supportMap) {
     const engines = supportMap[feature as F]
     const featureMap: Partial<Record<Engine, VersionRange[]>> = {}
+    const whyNotByEngine: Partial<Record<Engine, string[]>> = {}
 
     // Compute the maximum number of tests that any one engine has passed
     let maxPassed = 0
@@ -205,7 +216,7 @@ const supportMapToVersionRanges = <F extends string>(supportMap: SupportMap<F>):
 
     for (const engine in engines) {
       const versions = engines[engine as Engine]
-      const sortedVersions: { version: number[], supported: boolean }[] = []
+      const sortedVersions: { version: number[], supported: boolean, failed?: Set<string> }[] = []
 
       for (const version in versions) {
         const { force, passed, failed } = versions[version]
@@ -220,10 +231,16 @@ const supportMapToVersionRanges = <F extends string>(supportMap: SupportMap<F>):
             // feature to be unsupported if not all tests were run, since it could
             // be dangerous to assume otherwise.
             !failed && passed === maxPassed,
+          failed,
         })
       }
 
       sortedVersions.sort((a, b) => compareVersions(a.version, b.version))
+
+      if (sortedVersions.length) {
+        const last = sortedVersions[sortedVersions.length - 1]
+        if (last.failed) whyNotByEngine[engine as Engine] = [...last.failed].sort()
+      }
 
       const versionRanges: VersionRange[] = []
       let i = 0
@@ -269,9 +286,10 @@ const supportMapToVersionRanges = <F extends string>(supportMap: SupportMap<F>):
     }
 
     versionRangeMap[feature as F] = featureMap
+    whyNotMap[feature as F] = whyNotByEngine
   }
 
-  return versionRangeMap
+  return [versionRangeMap, whyNotMap]
 }
 
 const updateGithubDependencies = (): void => {
@@ -320,6 +338,7 @@ import('./kangax').then(kangax => {
   js.Destructuring.ES = { 2015: { force: true } }
   js.DynamicImport.ES = { 2015: { force: true } }
   js.ForOf.ES = { 2015: { force: true } }
+  js.FunctionNameConfigurable.ES = { 2015: { force: true } }
   js.Generator.ES = { 2015: { force: true } }
   js.NewTarget.ES = { 2015: { force: true } }
   js.ObjectExtensions.ES = { 2015: { force: true } }
@@ -372,6 +391,12 @@ import('./kangax').then(kangax => {
   js.TopLevelAwait.ES = { 2022: { force: true } }
   js.ArbitraryModuleNamespaceNames.ES = { 2022: { force: true } }
   js.RegexpMatchIndices.ES = { 2022: { force: true } }
+
+  // ES2023 features
+  js.Hashbang.ES = { 2023: { force: true } }
+
+  // ES2024 features
+  js.RegexpSetNotation.ES = { 2024: { force: true } }
 
   // This is a problem specific to Internet Explorer. See https://github.com/tc39/ecma262/issues/1440
   for (const engine in engines) {
@@ -441,6 +466,8 @@ import('./kangax').then(kangax => {
     '15': { force: false },
     '16': { force: true },
   }
+  js.NodeColonPrefixImport.ES = { 0: { force: true } }
+  js.NodeColonPrefixRequire.ES = { 0: { force: true } }
 
   // Arbitrary Module Namespace Names
   {
@@ -451,24 +478,41 @@ import('./kangax').then(kangax => {
     // From https://bugzilla.mozilla.org/show_bug.cgi?id=1670044
     js.ArbitraryModuleNamespaceNames.Firefox = { 87: { force: true } }
 
-    // This feature has been implemented in Safari but I have no idea what version
-    // this bug corresponds to: https://bugs.webkit.org/show_bug.cgi?id=217576
+    // From https://developer.apple.com/documentation/safari-release-notes/safari-14_1-release-notes
+    js.ArbitraryModuleNamespaceNames.Safari = { '14.1': { force: true } }
+    js.ArbitraryModuleNamespaceNames.IOS = { '14.5': { force: true } }
   }
 
   // Import assertions (note: these were removed from the JavaScript specification and never standardized)
   {
-    // From https://github.com/nodejs/node/blob/master/doc/changelogs/CHANGELOG_V16.md#16.14.0
-    js.ImportAssertions.Node = { '16.14': { force: true } }
+    js.ImportAssertions.Node = {
+      // From https://github.com/nodejs/node/blob/master/doc/changelogs/CHANGELOG_V16.md#16.14.0
+      '16.14': { force: true },
+
+      // Manually tested using a binary from https://nodejs.org/en/download/prebuilt-binaries
+      '22': { force: false },
+    }
 
     // MDN data is wrong here: https://bugs.webkit.org/show_bug.cgi?id=251600
     delete js.ImportAssertions.IOS
     delete js.ImportAssertions.Safari
   }
 
+  // Import attributes (the replacement for import assertions)
+  {
+    // Manually tested using binaries from https://nodejs.org/en/download/prebuilt-binaries
+    js.ImportAttributes.Node = {
+      '18.20': { force: true },
+      '19': { force: false },
+      '20.10': { force: true },
+    }
+  }
+
   // MDN data is wrong here: https://www.chromestatus.com/feature/6482797915013120
   js.ClassStaticBlocks.Chrome = { 91: { force: true } }
 
-  generateTableForJS(supportMapToVersionRanges(js))
+  const [jsVersionRanges, jsWhyNot] = supportMapToVersionRanges(js)
+  generateTableForJS(jsVersionRanges, jsWhyNot)
 })
 
 const css: SupportMap<CSSFeature> = {} as SupportMap<CSSFeature>
@@ -480,4 +524,8 @@ mergeSupportMaps(css, mdn.css)
 mergePrefixMaps(cssPrefix, caniuse.cssPrefix)
 mergePrefixMaps(cssPrefix, mdn.cssPrefix)
 
-generateTableForCSS(supportMapToVersionRanges(css), cssPrefix)
+// MDN data is wrong here, Firefox 127 still has gradient interpolation rendering bugs: https://bugzilla.mozilla.org/show_bug.cgi?id=1904106
+css.GradientInterpolation.Firefox = {}
+
+const [cssVersionRanges] = supportMapToVersionRanges(css)
+generateTableForCSS(cssVersionRanges, cssPrefix)

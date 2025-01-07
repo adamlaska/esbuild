@@ -16,31 +16,73 @@ const supportedEnvironments: Record<string, Engine> = {
 }
 
 const jsFeatures: Partial<Record<JSFeature, string>> = {
-  RegexpMatchIndices: 'javascript.builtins.RegExp.hasIndices',
   ClassStaticBlocks: 'javascript.classes.static_initialization_blocks',
-  TopLevelAwait: 'javascript.operators.await.top_level',
-  ImportMeta: 'javascript.operators.import_meta',
   ExportStarAs: 'javascript.statements.export.namespace',
   ImportAssertions: 'javascript.statements.import.import_assertions',
+  ImportAttributes: 'javascript.statements.import.import_attributes',
+  ImportMeta: 'javascript.operators.import_meta',
+  RegexpMatchIndices: 'javascript.builtins.RegExp.hasIndices',
+  TopLevelAwait: 'javascript.operators.await.top_level',
 }
 
 const cssFeatures: Partial<Record<CSSFeature, string | string[]>> = {
-  InsetProperty: 'css.properties.inset',
-  RebeccaPurple: 'css.types.color.named-color.rebeccapurple',
+  ColorFunctions: [
+    'css.types.color.color',
+    'css.types.color.lab',
+    'css.types.color.lch',
+    'css.types.color.oklab',
+    'css.types.color.oklch',
+  ],
+  GradientDoublePosition: [
+    'css.types.gradient.conic-gradient.doubleposition',
+    'css.types.gradient.linear-gradient.doubleposition',
+    'css.types.gradient.radial-gradient.doubleposition',
+    'css.types.gradient.repeating-linear-gradient.doubleposition',
+    'css.types.gradient.repeating-radial-gradient.doubleposition',
+  ],
+  GradientInterpolation: [
+    'css.types.gradient.conic-gradient.hue_interpolation_method',
+    'css.types.gradient.conic-gradient.interpolation_color_space',
+    'css.types.gradient.linear-gradient.hue_interpolation_method',
+    'css.types.gradient.linear-gradient.interpolation_color_space',
+    'css.types.gradient.radial-gradient.hue_interpolation_method',
+    'css.types.gradient.radial-gradient.interpolation_color_space',
+    'css.types.gradient.repeating-conic-gradient.hue_interpolation_method',
+    'css.types.gradient.repeating-conic-gradient.interpolation_color_space',
+    'css.types.gradient.repeating-linear-gradient.hue_interpolation_method',
+    'css.types.gradient.repeating-linear-gradient.interpolation_color_space',
+    'css.types.gradient.repeating-radial-gradient.hue_interpolation_method',
+    'css.types.gradient.repeating-radial-gradient.interpolation_color_space',
+  ],
+  GradientMidpoints: [
+    'css.types.gradient.linear-gradient.interpolation_hints',
+    'css.types.gradient.radial-gradient.interpolation_hints',
+    'css.types.gradient.repeating-linear-gradient.interpolation_hints',
+    'css.types.gradient.repeating-radial-gradient.interpolation_hints',
+  ],
   HexRGBA: 'css.types.color.rgb_hexadecimal_notation.alpha_hexadecimal_notation',
+  HWB: 'css.types.color.hwb',
+  InsetProperty: 'css.properties.inset',
   Modern_RGB_HSL: [
     'css.types.color.hsl.alpha_parameter',
     'css.types.color.hsl.space_separated_parameters',
-    'css.types.color.hsla.space_separated_parameters',
     'css.types.color.rgb.alpha_parameter',
     'css.types.color.rgb.float_values',
     'css.types.color.rgb.space_separated_parameters',
-    'css.types.color.rgba.float_values',
-    'css.types.color.rgba.space_separated_parameters',
   ],
+  Nesting: 'css.selectors.nesting',
+  RebeccaPurple: 'css.types.color.named-color.rebeccapurple',
+}
+
+const similarPrefixedProperty: Record<string, { prefix: string, property: string }> = {
+  'css.properties.mask-composite': {
+    prefix: '-webkit-',
+    property: 'css.properties.-webkit-mask-composite',
+  },
 }
 
 const cssPrefixFeatures: Record<string, CSSProperty> = {
+  'css.properties.mask-composite': 'DMaskComposite',
   'css.properties.mask-image': 'DMaskImage',
   'css.properties.mask-origin': 'DMaskOrigin',
   'css.properties.mask-position': 'DMaskPosition',
@@ -78,6 +120,7 @@ const extractProperty = (object: any, fullKey: string): any => {
   for (const key of fullKey.split('.')) {
     object = object[key]
   }
+  if (!object) throw new Error(`Failed to find "${fullKey}"`)
   return object
 }
 
@@ -95,10 +138,11 @@ const addFeatures = <F extends string>(map: SupportMap<F>, features: Partial<Rec
         if (engine) {
           const entries = support[env as BrowserName]!
 
-          for (const { flags, version_added, version_removed } of Array.isArray(entries) ? entries : [entries]) {
+          for (const { flags, version_added, version_removed, partial_implementation } of Array.isArray(entries) ? entries : [entries]) {
             if (typeof version_added === 'string' && isSemver.test(version_added)) {
-              // The feature isn't considered to be supported if it was removed or if it requires a flag
-              const isSupported = !version_removed || !flags
+              // The feature isn't considered to be supported if it was removed,
+              // if it requires a flag, or if it's only partially-implemented
+              const isSupported = (!version_removed || !flags) && !partial_implementation
               const maxVersion = maxVersions[engine]
               if (
                 !maxVersion ||
@@ -138,6 +182,9 @@ for (const fullKey in cssPrefixFeatures) {
 
       // Figure out which version this property can be used unprefixed, if any.
       // This assumes that support for these CSS properties is never removed.
+      // This assumption is wrong (Edge removed many features when it changed
+      // its engine from EdgeHTML to Blink, basically becoming another browser)
+      // but we ignore those cases for now.
       let version_unprefixed: string | undefined
       for (const { prefix, flags, version_added, version_removed } of entries) {
         if (!prefix && !flags && typeof version_added === 'string' && !version_removed && isSemver.test(version_added)) {
@@ -148,9 +195,25 @@ for (const fullKey in cssPrefixFeatures) {
       type PrefixRange = { prefix: string, start: string, end?: string }
       const ranges: PrefixRange[] = []
 
+      // The MDN dataset sometimes doesn't list prefixes if the values for the
+      // prefixed property are sufficiently different. In that case, we may need
+      // to search for the prefix information within another property instead.
+      const similar = similarPrefixedProperty[fullKey]
+      if (similar) {
+        const similarSupport: SupportBlock = extractProperty(bcd, similar.property).__compat.support
+        const similarEntries = similarSupport[env as BrowserName]
+        if (!similarEntries) continue
+        entries = Array.isArray(similarEntries) ? similarEntries : [similarEntries]
+      }
+
       // Find all version ranges where a given prefix is supported
       for (let i = 0; i < entries.length; i++) {
-        const { prefix, flags, version_added, version_removed } = entries[i]
+        let { prefix, flags, version_added, version_removed } = entries[i]
+
+        if (similar) {
+          if (prefix) throw new Error(`Unexpected prefix "${prefix}" for similar property "${similar.property}"`)
+          prefix = similar.prefix
+        }
 
         if (prefix && !flags && typeof version_added === 'string' && isSemver.test(version_added)) {
           const range: PrefixRange = { prefix, start: version_added }

@@ -69,6 +69,22 @@ func (fs *mockFS) ReadDirectory(path string) (DirEntries, error, error) {
 	if fs.Kind == MockWindows {
 		path = strings.ReplaceAll(path, "/", "\\")
 	}
+
+	var slash byte = '/'
+	if fs.Kind == MockWindows {
+		slash = '\\'
+	}
+
+	// Trim trailing slashes before lookup
+	firstSlash := strings.IndexByte(path, slash)
+	for {
+		i := strings.LastIndexByte(path, slash)
+		if i != len(path)-1 || i <= firstSlash {
+			break
+		}
+		path = path[:i]
+	}
+
 	if dir, ok := fs.dirs[path]; ok {
 		return dir, nil, nil
 	}
@@ -263,6 +279,10 @@ func (fs *mockFS) Rel(base string, target string) (string, bool) {
 		target = unix2win(target)
 	}
 	return target, true
+}
+
+func (fs *mockFS) EvalSymlinks(path string) (string, bool) {
+	return "", false
 }
 
 func (fs *mockFS) kind(dir string, base string) (symlink string, kind EntryKind) {

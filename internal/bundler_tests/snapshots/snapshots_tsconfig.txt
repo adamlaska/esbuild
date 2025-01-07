@@ -83,6 +83,82 @@ var foo = 123;
 console.log(foo);
 
 ================================================================================
+TestTsconfigDecoratorsUseDefineForClassFieldsFalse
+---------- /Users/user/project/out/entry.js ----------
+// Users/user/project/src/entry.ts
+var Class = class {
+};
+var ClassMethod = class {
+  foo() {
+  }
+};
+var ClassField = class {
+  constructor() {
+    this.foo = 123;
+  }
+};
+var ClassAccessor = class {
+  accessor foo = 123;
+  accessor bar;
+};
+new Class();
+new ClassMethod();
+new ClassField();
+new ClassAccessor();
+
+---------- /Users/user/project/out/entrywithdec.js ----------
+// Users/user/project/src/entrywithdec.ts
+var _Class_decorators, _init;
+_Class_decorators = [dec];
+var Class = class {
+};
+_init = __decoratorStart(null);
+Class = __decorateElement(_init, 0, "Class", _Class_decorators, Class);
+__runInitializers(_init, 1, Class);
+var _foo_dec, _init2;
+_foo_dec = [dec];
+var ClassMethod = class {
+  constructor() {
+    __runInitializers(_init2, 5, this);
+  }
+  foo() {
+  }
+};
+_init2 = __decoratorStart(null);
+__decorateElement(_init2, 1, "foo", _foo_dec, ClassMethod);
+__decoratorMetadata(_init2, ClassMethod);
+var _bar_dec, _foo_dec2, _init3;
+_foo_dec2 = [dec], _bar_dec = [dec];
+var ClassField = class {
+  constructor() {
+    this.foo = __runInitializers(_init3, 8, this, 123), __runInitializers(_init3, 11, this);
+    this.bar = __runInitializers(_init3, 12, this), __runInitializers(_init3, 15, this);
+  }
+};
+_init3 = __decoratorStart(null);
+__decorateElement(_init3, 5, "foo", _foo_dec2, ClassField);
+__decorateElement(_init3, 5, "bar", _bar_dec, ClassField);
+__decoratorMetadata(_init3, ClassField);
+var _bar_dec2, _foo_dec3, _init4, _foo, _bar;
+_foo_dec3 = [dec], _bar_dec2 = [dec];
+var ClassAccessor = class {
+  constructor() {
+    __privateAdd(this, _foo, __runInitializers(_init4, 8, this, 123)), __runInitializers(_init4, 11, this);
+    __privateAdd(this, _bar, __runInitializers(_init4, 12, this)), __runInitializers(_init4, 15, this);
+  }
+};
+_init4 = __decoratorStart(null);
+_foo = new WeakMap();
+_bar = new WeakMap();
+__decorateElement(_init4, 4, "foo", _foo_dec3, ClassAccessor, _foo);
+__decorateElement(_init4, 4, "bar", _bar_dec2, ClassAccessor, _bar);
+__decoratorMetadata(_init4, ClassAccessor);
+new Class();
+new ClassMethod();
+new ClassField();
+new ClassAccessor();
+
+================================================================================
 TestTsconfigExtendsArray
 ---------- /Users/user/project/out/main.js ----------
 console.log(/* @__PURE__ */ h(frag, null, /* @__PURE__ */ h("div", null)));
@@ -163,14 +239,10 @@ var foo3 = "shimFoo";
 var bar3 = "shimBar";
 
 // Users/user/project/src/main.ts
-if (foo2 !== "foo")
-  throw "fail: foo";
-if (bar2 !== "bar")
-  throw "fail: bar";
-if (foo3 !== "shimFoo")
-  throw "fail: shimFoo";
-if (bar3 !== "shimBar")
-  throw "fail: shimBar";
+if (foo2 !== "foo") throw "fail: foo";
+if (bar2 !== "bar") throw "fail: bar";
+if (foo3 !== "shimFoo") throw "fail: shimFoo";
+if (bar3 !== "shimBar") throw "fail: shimBar";
 
 ================================================================================
 TestTsconfigIgnoredTargetSilent
@@ -207,6 +279,23 @@ var import_util = __toESM(require_util());
 console.log((0, import_util.default)());
 
 ================================================================================
+TestTsconfigJsonAsteriskNameCollisionIssue3354
+---------- /Users/user/project/out.js ----------
+// web/bar/foo/foo.ts
+function foo() {
+  console.log("bar/foo");
+}
+
+// web/foo.ts
+function foo2() {
+  console.log("web/foo");
+  foo();
+}
+
+// entry.ts
+foo2();
+
+================================================================================
 TestTsconfigJsonBaseUrl
 ---------- /Users/user/project/out.js ----------
 // Users/user/project/src/lib/util.js
@@ -221,6 +310,15 @@ var require_util = __commonJS({
 // Users/user/project/src/app/entry.js
 var import_util = __toESM(require_util());
 console.log((0, import_util.default)());
+
+================================================================================
+TestTsconfigJsonBaseUrlIssue3307
+---------- /Users/user/project/out.js ----------
+// test.ts
+var foo = "well, this is correct...";
+export {
+  foo
+};
 
 ================================================================================
 TestTsconfigJsonCommentAllowed
@@ -239,6 +337,24 @@ var import_util = __toESM(require_util());
 console.log((0, import_util.default)());
 
 ================================================================================
+TestTsconfigJsonConfigDirBaseURL
+---------- /Users/user/project/out.js ----------
+// Users/user/project/lib/foo/bar
+console.log("works");
+
+================================================================================
+TestTsconfigJsonConfigDirBaseURLInheritedPaths
+---------- /Users/user/project/out.js ----------
+// Users/user/project/lib/foo/bar
+console.log("works");
+
+================================================================================
+TestTsconfigJsonConfigDirPaths
+---------- /Users/user/project/out.js ----------
+// Users/user/project/lib/foo/bar
+console.log("works");
+
+================================================================================
 TestTsconfigJsonExtends
 ---------- /out.js ----------
 // entry.jsx
@@ -249,6 +365,12 @@ TestTsconfigJsonExtendsAbsolute
 ---------- /out.js ----------
 // Users/user/project/entry.jsx
 console.log(/* @__PURE__ */ baseFactory("div", null), /* @__PURE__ */ baseFactory(derivedFragment, null));
+
+================================================================================
+TestTsconfigJsonExtendsArrayIssue3898
+---------- /Users/user/project/out.js ----------
+import {} from "MUST_KEEP";
+console.log(SUCCESS(WORKS, null, SUCCESS("div", null)));
 
 ================================================================================
 TestTsconfigJsonExtendsLoop
@@ -320,6 +442,26 @@ TestTsconfigJsonOverrideNodeModules
 console.log("good");
 
 ================================================================================
+TestTsconfigJsonPackagesExternal
+---------- /Users/user/project/out.js ----------
+// Users/user/project/src/entry.js
+import truePkg from "pkg1";
+
+// Users/user/project/src/stuff/pkg2.js
+var pkg2_default = success;
+
+// Users/user/project/src/entry.js
+truePkg();
+pkg2_default();
+
+================================================================================
+TestTsconfigJsonTopLevelMistakeWarning
+---------- /Users/user/project/out.js ----------
+// Users/user/project/src/entry.ts
+var Foo = @foo class {
+};
+
+================================================================================
 TestTsconfigJsonTrailingCommaAllowed
 ---------- /Users/user/project/out.js ----------
 // Users/user/project/src/lib/util.js
@@ -349,6 +491,12 @@ var both_default = /* @__PURE__ */ R.c(R.F, null, /* @__PURE__ */ R.c("div", nul
 
 // Users/user/project/entry.ts
 console.log(factory_default, fragment_default, both_default);
+
+================================================================================
+TestTsconfigPackageJsonExportsYarnPnP
+---------- /Users/user/project/out.js ----------
+// packages/app/index.tsx
+console.log(/* @__PURE__ */ success("div", null));
 
 ================================================================================
 TestTsconfigPaths
@@ -618,17 +766,17 @@ console.log(/* @__PURE__ */ jsxDEV(Fragment, { children: [
     fileName: "Users/user/project/entry.tsx",
     lineNumber: 2,
     columnNumber: 19
-  }, this),
+  }),
   /* @__PURE__ */ jsxDEV("div", {}, void 0, false, {
     fileName: "Users/user/project/entry.tsx",
     lineNumber: 2,
     columnNumber: 25
-  }, this)
+  })
 ] }, void 0, true, {
   fileName: "Users/user/project/entry.tsx",
   lineNumber: 2,
   columnNumber: 17
-}, this));
+}));
 
 ================================================================================
 TestTsconfigReactJSXWithDevInMainConfig
@@ -640,23 +788,29 @@ console.log(/* @__PURE__ */ jsxDEV(Fragment, { children: [
     fileName: "Users/user/project/entry.tsx",
     lineNumber: 2,
     columnNumber: 19
-  }, this),
+  }),
   /* @__PURE__ */ jsxDEV("div", {}, void 0, false, {
     fileName: "Users/user/project/entry.tsx",
     lineNumber: 2,
     columnNumber: 25
-  }, this)
+  })
 ] }, void 0, true, {
   fileName: "Users/user/project/entry.tsx",
   lineNumber: 2,
   columnNumber: 17
-}, this));
+}));
 
 ================================================================================
 TestTsconfigRemoveUnusedImports
 ---------- /Users/user/project/out.js ----------
 // Users/user/project/src/entry.ts
 console.log(1);
+
+================================================================================
+TestTsconfigStackOverflowYarnPnP
+---------- /Users/user/project/out.js ----------
+// entry.jsx
+console.log(/* @__PURE__ */ success("div", null));
 
 ================================================================================
 TestTsconfigUnrecognizedTargetWarning
@@ -703,8 +857,7 @@ TestTsconfigWithStatementAlwaysStrictFalse
 ---------- /Users/user/project/out.js ----------
 (() => {
   // Users/user/project/src/entry.ts
-  with (x)
-    y;
+  with (x) y;
 })();
 
 ================================================================================
@@ -712,8 +865,7 @@ TestTsconfigWithStatementStrictFalse
 ---------- /Users/user/project/out.js ----------
 (() => {
   // Users/user/project/src/entry.ts
-  with (x)
-    y;
+  with (x) y;
 })();
 
 ================================================================================
@@ -721,6 +873,5 @@ TestTsconfigWithStatementStrictTrueAlwaysStrictFalse
 ---------- /Users/user/project/out.js ----------
 (() => {
   // Users/user/project/src/entry.ts
-  with (x)
-    y;
+  with (x) y;
 })();
