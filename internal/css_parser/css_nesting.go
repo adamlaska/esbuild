@@ -3,7 +3,6 @@ package css_parser
 import (
 	"fmt"
 
-	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/compat"
 	"github.com/evanw/esbuild/internal/css_ast"
 	"github.com/evanw/esbuild/internal/logger"
@@ -16,39 +15,42 @@ func (p *parser) lowerNestingInRule(rule css_ast.Rule, results []css_ast.Rule) [
 			return css_ast.ComplexSelector{
 				Selectors: []css_ast.CompoundSelector{{
 					SubclassSelectors: []css_ast.SubclassSelector{{
-						Loc:  loc,
-						Data: &css_ast.SSPseudoClass{Name: "scope"},
+						Range: logger.Range{Loc: loc},
+						Data:  &css_ast.SSPseudoClass{Name: "scope"},
 					}},
 				}},
 			}
 		}
 
-		// Filter out pseudo elements because they are ignored by nested style
-		// rules. This is because pseudo-elements are not valid within :is():
-		// https://www.w3.org/TR/selectors-4/#matches-pseudo. This restriction
-		// may be relaxed in the future, but this restriction hash shipped so
-		// we're stuck with it: https://github.com/w3c/csswg-drafts/issues/7433.
-		selectors := r.Selectors
-		n := 0
-		for _, sel := range selectors {
+		parentSelectors := make([]css_ast.ComplexSelector, 0, len(r.Selectors))
+		for i, sel := range r.Selectors {
+			// Top-level "&" should be replaced with ":scope" to avoid recursion.
+			// From https://www.w3.org/TR/css-nesting-1/#nest-selector:
+			//
+			//   "When used in the selector of a nested style rule, the nesting
+			//   selector represents the elements matched by the parent rule. When
+			//   used in any other context, it represents the same elements as
+			//   :scope in that context (unless otherwise defined)."
+			//
+			substituted := make([]css_ast.CompoundSelector, 0, len(sel.Selectors))
+			for _, x := range sel.Selectors {
+				substituted = p.substituteAmpersandsInCompoundSelector(x, scope, substituted, keepLeadingCombinator)
+			}
+			r.Selectors[i] = css_ast.ComplexSelector{Selectors: substituted}
+
+			// Filter out pseudo elements because they are ignored by nested style
+			// rules. This is because pseudo-elements are not valid within :is():
+			// https://www.w3.org/TR/selectors-4/#matches-pseudo. This restriction
+			// may be relaxed in the future, but this restriction hash shipped so
+			// we're stuck with it: https://github.com/w3c/csswg-drafts/issues/7433.
+			//
+			// Note: This is only for the parent selector list that is used to
+			// substitute "&" within child rules. Do not filter out the pseudo
+			// element from the top-level selector list.
 			if !sel.UsesPseudoElement() {
-				// Top-level "&" should be replaced with ":scope" to avoid recursion.
-				// From https://www.w3.org/TR/css-nesting-1/#nest-selector:
-				//
-				//   "When used in the selector of a nested style rule, the nesting
-				//   selector represents the elements matched by the parent rule. When
-				//   used in any other context, it represents the same elements as
-				//   :scope in that context (unless otherwise defined)."
-				//
-				substituted := make([]css_ast.CompoundSelector, 0, len(sel.Selectors))
-				for _, x := range sel.Selectors {
-					substituted = p.substituteAmpersandsInCompoundSelector(x, scope, substituted, keepLeadingCombinator)
-				}
-				selectors[n] = css_ast.ComplexSelector{Selectors: substituted}
-				n++
+				parentSelectors = append(parentSelectors, css_ast.ComplexSelector{Selectors: substituted})
 			}
 		}
-		selectors = selectors[:n]
 
 		// Emit this selector before its nested children
 		start := len(results)
@@ -56,7 +58,7 @@ func (p *parser) lowerNestingInRule(rule css_ast.Rule, results []css_ast.Rule) [
 
 		// Lower all children and filter out ones that become empty
 		context := lowerNestingContext{
-			parentSelectors: selectors,
+			parentSelectors: parentSelectors,
 			loweredRules:    results,
 		}
 		r.Rules = p.lowerNestingInRulesAndReturnRemaining(r.Rules, &context)
@@ -115,79 +117,16 @@ func (p *parser) lowerNestingInRuleWithContext(rule css_ast.Rule, context *lower
 		// "a, b { &.c, & d, e & {} }" => ":is(a, b).c, :is(a, b) d, e :is(a, b) {}"
 
 		// Pass 1: Canonicalize and analyze our selectors
-		canUseGroupDescendantCombinator := true // Can we do "parent «space» :is(...selectors)"?
-		canUseGroupSubSelector := true          // Can we do "parent«nospace»:is(...selectors)"?
-		var commonLeadingCombinator css_ast.Combinator
 		for i := range r.Selectors {
 			sel := &r.Selectors[i]
 
 			// Inject the implicit "&" now for simplicity later on
 			if sel.IsRelative() {
-				sel.Selectors = append([]css_ast.CompoundSelector{{NestingSelectorLoc: ast.MakeIndex32(uint32(rule.Loc.Start))}}, sel.Selectors...)
-			}
-
-			// Pseudo-elements aren't supported by ":is" (i.e. ":is(div, div::before)"
-			// is the same as ":is(div)") so we need to avoid generating ":is" if a
-			// pseudo-element is present.
-			if sel.UsesPseudoElement() {
-				canUseGroupDescendantCombinator = false
-				canUseGroupSubSelector = false
-			}
-
-			// Are all children of the form "& «something»"?
-			if len(sel.Selectors) < 2 || !sel.Selectors[0].IsSingleAmpersand() {
-				canUseGroupDescendantCombinator = false
-			} else {
-				// If all children are of the form "& «COMBINATOR» «something»", is «COMBINATOR» the same in all cases?
-				var combinator css_ast.Combinator
-				if len(sel.Selectors) >= 2 {
-					combinator = sel.Selectors[1].Combinator
-				}
-				if i == 0 {
-					commonLeadingCombinator = combinator
-				} else if commonLeadingCombinator.Byte != combinator.Byte {
-					canUseGroupDescendantCombinator = false
-				}
-			}
-
-			// Are all children of the form "&«something»"?
-			if first := sel.Selectors[0]; !first.HasNestingSelector() || first.IsSingleAmpersand() {
-				canUseGroupSubSelector = false
+				sel.Selectors = append([]css_ast.CompoundSelector{{NestingSelectorLocs: []logger.Loc{rule.Loc}}}, sel.Selectors...)
 			}
 		}
 
-		// Avoid generating ":is" if it's not supported
-		if p.options.unsupportedCSSFeatures.Has(compat.IsPseudoClass) && len(r.Selectors) > 1 {
-			canUseGroupDescendantCombinator = false
-			canUseGroupSubSelector = false
-		}
-
-		// Try to apply simplifications for shorter output
-		if canUseGroupDescendantCombinator {
-			// "& a, & b {}" => "& :is(a, b) {}"
-			// "& > a, & > b {}" => "& > :is(a, b) {}"
-			nestingSelectorLoc := r.Selectors[0].Selectors[0].NestingSelectorLoc
-			for i := range r.Selectors {
-				sel := &r.Selectors[i]
-				sel.Selectors = sel.Selectors[1:]
-			}
-			merged := p.multipleComplexSelectorsToSingleComplexSelector(r.Selectors)(rule.Loc)
-			merged.Selectors = append([]css_ast.CompoundSelector{{NestingSelectorLoc: nestingSelectorLoc}}, merged.Selectors...)
-			r.Selectors = []css_ast.ComplexSelector{merged}
-		} else if canUseGroupSubSelector {
-			// "&a, &b {}" => "&:is(a, b) {}"
-			// "> &a, > &b {}" => "> &:is(a, b) {}"
-			nestingSelectorLoc := r.Selectors[0].Selectors[0].NestingSelectorLoc
-			for i := range r.Selectors {
-				sel := &r.Selectors[i]
-				sel.Selectors[0].NestingSelectorLoc = ast.Index32{}
-			}
-			merged := p.multipleComplexSelectorsToSingleComplexSelector(r.Selectors)(rule.Loc)
-			merged.Selectors[0].NestingSelectorLoc = nestingSelectorLoc
-			r.Selectors = []css_ast.ComplexSelector{merged}
-		}
-
-		// Pass 2: Substitue "&" for the parent selector
+		// Pass 2: Substitute "&" for the parent selector
 		if !p.options.unsupportedCSSFeatures.Has(compat.IsPseudoClass) || len(context.parentSelectors) <= 1 {
 			// If we can use ":is", or we don't have to because there's only one
 			// parent selector, or we are using ":is()" to match zero parent selectors
@@ -348,9 +287,7 @@ func (p *parser) substituteAmpersandsInCompoundSelector(
 	results []css_ast.CompoundSelector,
 	strip leadingCombinatorStrip,
 ) []css_ast.CompoundSelector {
-	if sel.HasNestingSelector() {
-		nestingSelectorLoc := logger.Loc{Start: int32(sel.NestingSelectorLoc.GetIndex())}
-		sel.NestingSelectorLoc = ast.Index32{}
+	for _, nestingSelectorLoc := range sel.NestingSelectorLocs {
 		replacement := replacementFn(nestingSelectorLoc)
 
 		// Convert the replacement to a single compound selector
@@ -377,10 +314,10 @@ func (p *parser) substituteAmpersandsInCompoundSelector(
 			p.reportNestingWithGeneratedPseudoClassIs(nestingSelectorLoc)
 			single = css_ast.CompoundSelector{
 				SubclassSelectors: []css_ast.SubclassSelector{{
-					Loc: nestingSelectorLoc,
+					Range: logger.Range{Loc: nestingSelectorLoc},
 					Data: &css_ast.SSPseudoClassWithSelectorList{
 						Kind:      css_ast.PseudoClassIs,
-						Selectors: []css_ast.ComplexSelector{replacement.CloneWithoutLeadingCombinator()},
+						Selectors: []css_ast.ComplexSelector{replacement.Clone()},
 					},
 				}},
 			}
@@ -393,7 +330,7 @@ func (p *parser) substituteAmpersandsInCompoundSelector(
 			if sel.TypeSelector != nil {
 				p.reportNestingWithGeneratedPseudoClassIs(nestingSelectorLoc)
 				subclassSelectorPrefix = append(subclassSelectorPrefix, css_ast.SubclassSelector{
-					Loc: sel.TypeSelector.FirstLoc(),
+					Range: sel.TypeSelector.Range(),
 					Data: &css_ast.SSPseudoClassWithSelectorList{
 						Kind:      css_ast.PseudoClassIs,
 						Selectors: []css_ast.ComplexSelector{{Selectors: []css_ast.CompoundSelector{{TypeSelector: sel.TypeSelector}}}},
@@ -411,6 +348,7 @@ func (p *parser) substituteAmpersandsInCompoundSelector(
 			sel.SubclassSelectors = append(subclassSelectorPrefix, sel.SubclassSelectors...)
 		}
 	}
+	sel.NestingSelectorLocs = nil
 
 	// "div { :is(&.foo) {} }" => ":is(div.foo) {}"
 	for _, ss := range sel.SubclassSelectors {
@@ -446,7 +384,7 @@ func (p *parser) multipleComplexSelectorsToSingleComplexSelector(selectors []css
 	for i, sel := range selectors {
 		// "> a, > b" => "> :is(a, b)" (the caller should have already checked that all leading combinators are the same)
 		leadingCombinator = sel.Selectors[0].Combinator
-		clones[i] = sel.CloneWithoutLeadingCombinator()
+		clones[i] = sel.Clone()
 	}
 
 	return func(loc logger.Loc) css_ast.ComplexSelector {
@@ -454,7 +392,7 @@ func (p *parser) multipleComplexSelectorsToSingleComplexSelector(selectors []css
 			Selectors: []css_ast.CompoundSelector{{
 				Combinator: leadingCombinator,
 				SubclassSelectors: []css_ast.SubclassSelector{{
-					Loc: loc,
+					Range: logger.Range{Loc: loc},
 					Data: &css_ast.SSPseudoClassWithSelectorList{
 						Kind:      css_ast.PseudoClassIs,
 						Selectors: clones,

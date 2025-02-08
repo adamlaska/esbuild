@@ -13,14 +13,14 @@ test:
 	@$(MAKE) --no-print-directory -j6 test-common
 
 # These tests are for development
-test-common: test-go vet-go no-filepath verify-source-map end-to-end-tests js-api-tests plugin-tests register-test node-unref-tests
+test-common: test-go vet-go no-filepath verify-source-map end-to-end-tests js-api-tests plugin-tests register-test node-unref-tests decorator-tests
 
 # These tests are for release (the extra tests are not included in "test" because they are pretty slow)
 test-all:
 	@$(MAKE) --no-print-directory -j6 test-common test-deno ts-type-tests test-wasm-node test-wasm-browser lib-typecheck test-yarnpnp
 
 check-go-version:
-	@go version | grep ' go1\.20\.6 ' || (echo 'Please install Go version 1.20.6' && false)
+	@go version | grep ' go1\.23\.5 ' || (echo 'Please install Go version 1.23.5' && false)
 
 # Note: Don't add "-race" here by default. The Go race detector is currently
 # only supported on the following configurations:
@@ -69,6 +69,7 @@ test-deno: esbuild platform-deno
 	@echo '✅ deno tests passed' # I couldn't find a Deno API for telling when tests have failed, so I'm doing this here instead
 	deno eval 'import { transform, stop } from "file://$(shell pwd)/deno/mod.js"; console.log((await transform("1+2")).code); stop()' | grep "1 + 2;"
 	deno eval 'import { transform, stop } from "file://$(shell pwd)/deno/wasm.js"; console.log((await transform("1+2")).code); stop()' | grep "1 + 2;"
+	deno run -A './deno/mod.js' # See: https://github.com/evanw/esbuild/pull/3917
 
 test-deno-windows: esbuild platform-deno
 	ESBUILD_BINARY_PATH=./esbuild.exe deno test --allow-run --allow-env --allow-net --allow-read --allow-write --no-check scripts/deno-tests.js
@@ -84,6 +85,16 @@ verify-source-map: version-go | scripts/node_modules
 end-to-end-tests: version-go
 	node scripts/esbuild.js npm/esbuild/package.json --version
 	node scripts/end-to-end-tests.js
+
+# Note: The TypeScript source code for these tests was copied from the repo
+# https://github.com/evanw/decorator-tests, which is the official location of
+# the source code for these tests. Any changes to these tests should be made
+# there first and then copied here afterward.
+decorator-tests: esbuild
+	./esbuild scripts/decorator-tests.ts --target=es2022 --outfile=scripts/decorator-tests.js
+	node scripts/decorator-tests.js
+	node scripts/decorator-tests.js | grep -q 'All checks passed'
+	git diff --exit-code scripts/decorator-tests.js
 
 js-api-tests: version-go
 	node scripts/esbuild.js npm/esbuild/package.json --version
@@ -107,10 +118,13 @@ test-old-ts: platform-neutral | require/old-ts/node_modules
 node-unref-tests: | scripts/node_modules
 	node scripts/node-unref-tests.js
 
-lib-typecheck: lib-typecheck-node lib-typecheck-deno
+lib-typecheck: lib-typecheck-node lib-typecheck-node-nolib lib-typecheck-deno
 
 lib-typecheck-node: | lib/node_modules
 	cd lib && node_modules/.bin/tsc -noEmit -p tsconfig.json
+
+lib-typecheck-node-nolib: | lib/node_modules
+	cd lib && node_modules/.bin/tsc -noEmit -p tsconfig-nolib.json
 
 lib-typecheck-deno: lib/deno/lib.deno.d.ts | lib/node_modules
 	cd lib && node_modules/.bin/tsc -noEmit -p tsconfig-deno.json
@@ -119,7 +133,7 @@ lib/deno/lib.deno.d.ts:
 	deno types > lib/deno/lib.deno.d.ts
 
 # End-to-end tests
-test-e2e: test-e2e-npm test-e2e-pnpm test-e2e-yarn-berry test-e2e-deno
+test-e2e: test-e2e-npm test-e2e-pnpm test-e2e-yarn test-e2e-yarn-berry test-e2e-deno
 
 test-e2e-npm:
 	# Test normal install
@@ -189,6 +203,31 @@ test-e2e-pnpm:
 	# Clean up
 	rm -fr e2e-pnpm
 
+test-e2e-yarn:
+	# Test normal install
+	rm -fr e2e-yarn && mkdir e2e-yarn && cd e2e-yarn && echo {} > package.json && touch yarn.lock && yarn set version classic && yarn add esbuild
+	cd e2e-yarn && echo "1+2" | yarn esbuild && yarn node -p "require('esbuild').transformSync('1+2').code"
+	# Test CI reinstall
+	cd e2e-yarn && rm -fr node_modules && yarn install --immutable
+	cd e2e-yarn && echo "1+2" | yarn esbuild && yarn node -p "require('esbuild').transformSync('1+2').code"
+
+	# Test install without scripts
+	rm -fr e2e-yarn && mkdir e2e-yarn && cd e2e-yarn && echo {} > package.json && touch yarn.lock && echo 'enableScripts: false' > .yarnrc.yml && yarn set version classic && yarn add esbuild
+	cd e2e-yarn && echo "1+2" | yarn esbuild && yarn node -p "require('esbuild').transformSync('1+2').code"
+	# Test CI reinstall
+	cd e2e-yarn && rm -fr node_modules && yarn install --immutable
+	cd e2e-yarn && echo "1+2" | yarn esbuild && yarn node -p "require('esbuild').transformSync('1+2').code"
+
+	# Test install without optional dependencies
+	rm -fr e2e-yarn && mkdir e2e-yarn && cd e2e-yarn && echo {} > package.json && touch yarn.lock && yarn set version classic && yarn add esbuild
+	cd e2e-yarn && echo "1+2" | yarn esbuild && yarn node -p "require('esbuild').transformSync('1+2').code"
+	# Test CI reinstall
+	cd e2e-yarn && rm -fr node_modules && yarn install --immutable --ignore-optional
+	cd e2e-yarn && echo "1+2" | yarn esbuild && yarn node -p "require('esbuild').transformSync('1+2').code"
+
+	# Clean up
+	rm -fr e2e-yarn
+
 test-e2e-yarn-berry:
 	# Test normal install
 	rm -fr e2e-yb && mkdir e2e-yb && cd e2e-yb && echo {} > package.json && touch yarn.lock && yarn set version berry && yarn add esbuild
@@ -246,6 +285,7 @@ version-go:
 
 platform-all:
 	@$(MAKE) --no-print-directory -j4 \
+		platform-aix-ppc64 \
 		platform-android-arm \
 		platform-android-arm64 \
 		platform-android-x64 \
@@ -263,10 +303,13 @@ platform-all:
 		platform-linux-riscv64 \
 		platform-linux-s390x \
 		platform-linux-x64 \
+		platform-netbsd-arm64 \
 		platform-netbsd-x64 \
 		platform-neutral \
+		platform-openbsd-arm64 \
 		platform-openbsd-x64 \
 		platform-sunos-x64 \
+		platform-wasi-preview1 \
 		platform-wasm \
 		platform-win32-arm64 \
 		platform-win32-ia32 \
@@ -284,6 +327,10 @@ platform-win32-arm64: version-go
 	node scripts/esbuild.js npm/@esbuild/win32-arm64/package.json --version
 	CGO_ENABLED=0 GOOS=windows GOARCH=arm64 go build $(GO_FLAGS) -o npm/@esbuild/win32-arm64/esbuild.exe ./cmd/esbuild
 
+platform-wasi-preview1: version-go
+	node scripts/esbuild.js npm/@esbuild/wasi-preview1/package.json --version
+	CGO_ENABLED=0 GOOS=wasip1 GOARCH=wasm go build $(GO_FLAGS) -o npm/@esbuild/wasi-preview1/esbuild.wasm ./cmd/esbuild
+
 platform-unixlike: version-go
 	@test -n "$(GOOS)" || (echo "The environment variable GOOS must be provided" && false)
 	@test -n "$(GOARCH)" || (echo "The environment variable GOARCH must be provided" && false)
@@ -296,6 +343,9 @@ platform-android-x64: platform-wasm
 
 platform-android-arm: platform-wasm
 	node scripts/esbuild.js npm/@esbuild/android-arm/package.json --version
+
+platform-aix-ppc64:
+	@$(MAKE) --no-print-directory GOOS=aix GOARCH=ppc64 NPMDIR=npm/@esbuild/aix-ppc64 platform-unixlike
 
 platform-android-arm64:
 	@$(MAKE) --no-print-directory GOOS=android GOARCH=arm64 NPMDIR=npm/@esbuild/android-arm64 platform-unixlike
@@ -312,8 +362,14 @@ platform-freebsd-x64:
 platform-freebsd-arm64:
 	@$(MAKE) --no-print-directory GOOS=freebsd GOARCH=arm64 NPMDIR=npm/@esbuild/freebsd-arm64 platform-unixlike
 
+platform-netbsd-arm64:
+	@$(MAKE) --no-print-directory GOOS=netbsd GOARCH=arm64 NPMDIR=npm/@esbuild/netbsd-arm64 platform-unixlike
+
 platform-netbsd-x64:
 	@$(MAKE) --no-print-directory GOOS=netbsd GOARCH=amd64 NPMDIR=npm/@esbuild/netbsd-x64 platform-unixlike
+
+platform-openbsd-arm64:
+	@$(MAKE) --no-print-directory GOOS=openbsd GOARCH=arm64 NPMDIR=npm/@esbuild/openbsd-arm64 platform-unixlike
 
 platform-openbsd-x64:
 	@$(MAKE) --no-print-directory GOOS=openbsd GOARCH=amd64 NPMDIR=npm/@esbuild/openbsd-x64 platform-unixlike
@@ -360,6 +416,7 @@ platform-deno: platform-wasm
 	node scripts/esbuild.js ./esbuild --deno
 
 publish-all: check-go-version
+	@grep "## `cat version.txt`" CHANGELOG.md || (echo "Missing '## `cat version.txt`' in CHANGELOG.md (required for automatic release notes)" && false)
 	@npm --version > /dev/null || (echo "The 'npm' command must be in your path to publish" && false)
 	@echo "Checking for uncommitted/untracked changes..." && test -z "`git status --porcelain | grep -vE 'M (CHANGELOG\.md|version\.txt)'`" || \
 		(echo "Refusing to publish with these uncommitted/untracked changes:" && \
@@ -386,25 +443,30 @@ publish-all: check-go-version
 		publish-win32-x64 \
 		publish-win32-ia32 \
 		publish-win32-arm64 \
-		publish-sunos-x64
+		publish-wasi-preview1
 
 	@echo Enter one-time password:
 	@read OTP && OTP="$$OTP" $(MAKE) --no-print-directory -j4 \
-		publish-freebsd-x64 \
 		publish-freebsd-arm64 \
-		publish-openbsd-x64 \
+		publish-freebsd-x64 \
+		publish-openbsd-arm64 \
+		publish-openbsd-x64
+
+	@echo Enter one-time password:
+	@read OTP && OTP="$$OTP" $(MAKE) --no-print-directory -j4 \
+		publish-darwin-arm64 \
+		publish-darwin-x64 \
+		publish-netbsd-arm64 \
 		publish-netbsd-x64
 
 	@echo Enter one-time password:
 	@read OTP && OTP="$$OTP" $(MAKE) --no-print-directory -j4 \
 		publish-android-x64 \
 		publish-android-arm \
-		publish-android-arm64 \
-		publish-darwin-x64
+		publish-android-arm64
 
 	@echo Enter one-time password:
 	@read OTP && OTP="$$OTP" $(MAKE) --no-print-directory -j4 \
-		publish-darwin-arm64 \
 		publish-linux-x64 \
 		publish-linux-ia32 \
 		publish-linux-arm
@@ -418,8 +480,10 @@ publish-all: check-go-version
 
 	@echo Enter one-time password:
 	@read OTP && OTP="$$OTP" $(MAKE) --no-print-directory -j4 \
+		publish-aix-ppc64 \
 		publish-linux-ppc64 \
-		publish-linux-s390x
+		publish-linux-s390x \
+		publish-sunos-x64
 
 	# Do these last to avoid race conditions
 	@echo Enter one-time password:
@@ -439,6 +503,12 @@ publish-win32-ia32: platform-win32-ia32
 
 publish-win32-arm64: platform-win32-arm64
 	test -n "$(OTP)" && cd npm/@esbuild/win32-arm64 && npm publish --otp="$(OTP)"
+
+publish-wasi-preview1: platform-wasi-preview1
+	test -n "$(OTP)" && cd npm/@esbuild/wasi-preview1 && npm publish --otp="$(OTP)"
+
+publish-aix-ppc64: platform-aix-ppc64
+	test -n "$(OTP)" && cd npm/@esbuild/aix-ppc64 && npm publish --otp="$(OTP)"
 
 publish-android-x64: platform-android-x64
 	test -n "$(OTP)" && cd npm/@esbuild/android-x64 && npm publish --otp="$(OTP)"
@@ -461,8 +531,14 @@ publish-freebsd-x64: platform-freebsd-x64
 publish-freebsd-arm64: platform-freebsd-arm64
 	test -n "$(OTP)" && cd npm/@esbuild/freebsd-arm64 && npm publish --otp="$(OTP)"
 
+publish-netbsd-arm64: platform-netbsd-arm64
+	test -n "$(OTP)" && cd npm/@esbuild/netbsd-arm64 && npm publish --otp="$(OTP)"
+
 publish-netbsd-x64: platform-netbsd-x64
 	test -n "$(OTP)" && cd npm/@esbuild/netbsd-x64 && npm publish --otp="$(OTP)"
+
+publish-openbsd-arm64: platform-openbsd-arm64
+	test -n "$(OTP)" && cd npm/@esbuild/openbsd-arm64 && npm publish --otp="$(OTP)"
 
 publish-openbsd-x64: platform-openbsd-x64
 	test -n "$(OTP)" && cd npm/@esbuild/openbsd-x64 && npm publish --otp="$(OTP)"
@@ -538,6 +614,7 @@ validate-build:
 # This checks that the published binaries are bitwise-identical to the locally-build binaries
 validate-builds:
 	git fetch --all --tags && git checkout "v$(ESBUILD_VERSION)"
+	@$(MAKE) --no-print-directory TARGET=platform-aix-ppc64      SCOPE=@esbuild/ PACKAGE=aix-ppc64       SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-android-arm    SCOPE=@esbuild/ PACKAGE=android-arm     SUBPATH=esbuild.wasm validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-android-arm64  SCOPE=@esbuild/ PACKAGE=android-arm64   SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-android-x64    SCOPE=@esbuild/ PACKAGE=android-x64     SUBPATH=esbuild.wasm validate-build
@@ -554,9 +631,12 @@ validate-builds:
 	@$(MAKE) --no-print-directory TARGET=platform-linux-riscv64  SCOPE=@esbuild/ PACKAGE=linux-riscv64   SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-linux-s390x    SCOPE=@esbuild/ PACKAGE=linux-s390x     SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-linux-x64      SCOPE=@esbuild/ PACKAGE=linux-x64       SUBPATH=bin/esbuild  validate-build
+	@$(MAKE) --no-print-directory TARGET=platform-netbsd-arm64   SCOPE=@esbuild/ PACKAGE=netbsd-arm64    SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-netbsd-x64     SCOPE=@esbuild/ PACKAGE=netbsd-x64      SUBPATH=bin/esbuild  validate-build
+	@$(MAKE) --no-print-directory TARGET=platform-openbsd-arm64  SCOPE=@esbuild/ PACKAGE=openbsd-arm64   SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-openbsd-x64    SCOPE=@esbuild/ PACKAGE=openbsd-x64     SUBPATH=bin/esbuild  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-sunos-x64      SCOPE=@esbuild/ PACKAGE=sunos-x64       SUBPATH=bin/esbuild  validate-build
+	@$(MAKE) --no-print-directory TARGET=platform-wasi-preview1  SCOPE=@esbuild/ PACKAGE=wasi-preview1   SUBPATH=esbuild.wasm validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-wasm                           PACKAGE=esbuild-wasm    SUBPATH=esbuild.wasm validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-win32-arm64    SCOPE=@esbuild/ PACKAGE=win32-arm64     SUBPATH=esbuild.exe  validate-build
 	@$(MAKE) --no-print-directory TARGET=platform-win32-ia32     SCOPE=@esbuild/ PACKAGE=win32-ia32      SUBPATH=esbuild.exe  validate-build
@@ -566,10 +646,12 @@ clean:
 	go clean -cache
 	go clean -testcache
 	rm -f esbuild
+	rm -f npm/@esbuild/wasi-preview1/esbuild.wasm
 	rm -f npm/@esbuild/win32-arm64/esbuild.exe
 	rm -f npm/@esbuild/win32-ia32/esbuild.exe
 	rm -f npm/@esbuild/win32-x64/esbuild.exe
 	rm -f npm/esbuild-wasm/esbuild.wasm npm/esbuild-wasm/wasm_exec*.js
+	rm -rf npm/@esbuild/aix-ppc64/bin
 	rm -rf npm/@esbuild/android-arm/bin npm/@esbuild/android-arm/esbuild.wasm npm/@esbuild/android-arm/wasm_exec*.js
 	rm -rf npm/@esbuild/android-arm64/bin
 	rm -rf npm/@esbuild/android-x64/bin npm/@esbuild/android-x64/esbuild.wasm npm/@esbuild/android-x64/wasm_exec*.js
@@ -586,7 +668,9 @@ clean:
 	rm -rf npm/@esbuild/linux-riscv64/bin
 	rm -rf npm/@esbuild/linux-s390x/bin
 	rm -rf npm/@esbuild/linux-x64/bin
+	rm -rf npm/@esbuild/netbsd-arm64/bin
 	rm -rf npm/@esbuild/netbsd-x64/bin
+	rm -rf npm/@esbuild/openbsd-arm64/bin
 	rm -rf npm/@esbuild/openbsd-x64/bin
 	rm -rf npm/@esbuild/sunos-x64/bin
 	rm -rf npm/esbuild-wasm/esm
@@ -632,7 +716,7 @@ compat-table: esbuild
 	node --enable-source-maps compat-table/out.js
 
 update-compat-table: esbuild
-	cd compat-table && npm update --silent
+	cd compat-table && npm i @mdn/browser-compat-data@latest caniuse-lite@latest --silent
 	./esbuild compat-table/src/index.ts --bundle --platform=node --external:./compat-table/repos/* --outfile=compat-table/out.js --log-level=warning --sourcemap
 	node --enable-source-maps compat-table/out.js --update
 
@@ -1021,9 +1105,15 @@ bench-rome-parcel2: | require/parcel2/node_modules bench/rome bench/rome-verify
 
 	# Inject aliases into "package.json" to fix Parcel 2 ignoring "tsconfig.json".
 	# Also inject "engines": "node" to avoid Parcel 2 mangling node globals.
+	# Also inject "includeNodeModules": true or the aliases will be ignored.
 	cat require/parcel2/package.json | sed '/^\}/d' > bench/rome/parcel2/package.json
 	echo ', "engines": { "node": "14.0.0" }' >> bench/rome/parcel2/package.json
+	echo ', "targets": { "main": { "includeNodeModules": true, "optimize": true } }' >> bench/rome/parcel2/package.json
 	echo ', $(ROME_PARCEL_ALIASES) }' >> bench/rome/parcel2/package.json
+
+	# Parcel's minifier preserves all comments in the source code by default.
+	# Removing comments in the minified output requires a config file.
+	echo '{ "format": { "comments": false } }' > bench/rome/parcel2/.terserrc
 
 	cd bench/rome/parcel2 && time -p node_modules/.bin/parcel build entry.ts --dist-dir . --cache-dir .cache
 	du -h bench/rome/parcel2/entry.js*

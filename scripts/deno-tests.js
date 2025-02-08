@@ -15,39 +15,33 @@ try {
 Deno.mkdirSync(rootTestDir, { recursive: true })
 
 function test(name, backends, fn) {
-  const singleTest = (name, fn) => Deno.test({
-    name,
-    fn: () => new Promise((resolve, reject) => {
-      const minutes = 5
-      const timeout = setTimeout(() => reject(new Error(`Timeout for "${name}" after ${minutes} minutes`)), minutes * 60 * 1000)
-      const cancel = () => clearTimeout(timeout)
-      const promise = fn()
-      promise.then(cancel, cancel)
-      promise.then(resolve, reject)
-    }),
-
-    // It's ok that the Go WebAssembly runtime uses "setTimeout"
-    sanitizeResources: false,
-    sanitizeOps: false,
-  })
+  // Note: Do not try to add a timeout for the tests below. It turns out that
+  // calling "setTimeout" from within "Deno.test" changes how Deno waits for
+  // promises in a way that masks problems that would otherwise occur. We want
+  // test coverage for the way that people will likely be using these API calls.
+  //
+  // Specifically tests that Deno would otherwise have failed with "error:
+  // Promise resolution is still pending but the event loop has already
+  // resolved" were being allowed to pass instead. See this issue for more
+  // information: https://github.com/evanw/esbuild/issues/3682
 
   for (const backend of backends) {
     switch (backend) {
       case 'native':
-        singleTest(name + '-native', async () => {
+        Deno.test(name + '-native', async () => {
           let testDir = path.join(rootTestDir, name + '-native')
           await Deno.mkdir(testDir, { recursive: true })
           try {
             await fn({ esbuild: esbuildNative, testDir })
             await Deno.remove(testDir, { recursive: true }).catch(() => null)
           } finally {
-            esbuildNative.stop()
+            await esbuildNative.stop()
           }
         })
         break
 
       case 'wasm-main':
-        singleTest(name + '-wasm-main', async () => {
+        Deno.test(name + '-wasm-main', async () => {
           let testDir = path.join(rootTestDir, name + '-wasm-main')
           await esbuildWASM.initialize({ wasmModule, worker: false })
           await Deno.mkdir(testDir, { recursive: true })
@@ -55,13 +49,13 @@ function test(name, backends, fn) {
             await fn({ esbuild: esbuildWASM, testDir })
             await Deno.remove(testDir, { recursive: true }).catch(() => null)
           } finally {
-            esbuildWASM.stop()
+            await esbuildWASM.stop()
           }
         })
         break
 
       case 'wasm-worker':
-        singleTest(name + '-wasm-worker', async () => {
+        Deno.test(name + '-wasm-worker', async () => {
           let testDir = path.join(rootTestDir, name + '-wasm-worker')
           await esbuildWASM.initialize({ wasmModule, worker: true })
           await Deno.mkdir(testDir, { recursive: true })
@@ -69,7 +63,7 @@ function test(name, backends, fn) {
             await fn({ esbuild: esbuildWASM, testDir })
             await Deno.remove(testDir, { recursive: true }).catch(() => null)
           } finally {
-            esbuildWASM.stop()
+            await esbuildWASM.stop()
           }
         })
         break
@@ -152,17 +146,17 @@ test("basicTransform", ['native', 'wasm-main', 'wasm-worker'], async ({ esbuild 
 test("largeTransform", ['native'], async ({ esbuild }) => {
   // This should be large enough to be bigger than Deno's write buffer
   let x = '0'
-  for (let i = 0; i < 1000; i++)x += '+' + i
+  for (let i = 0; i < 1000; i++) x += '+' + i
   x += ','
   let y = 'return['
-  for (let i = 0; i < 1000; i++)y += x
+  for (let i = 0; i < 1000; i++) y += x
   y += ']'
   const result = await esbuild.build({
     stdin: {
       contents: y,
     },
     write: false,
-    minify: true,
+    minifyWhitespace: true,
   })
   asserts.assertStrictEquals(result.outputFiles[0].text, y.slice(0, -2) + '];\n')
 })

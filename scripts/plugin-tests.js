@@ -980,7 +980,7 @@ let pluginTests = {
 
   async virtualEntryPoints({ esbuild, testDir }) {
     const result = await esbuild.build({
-      entryPoints: ['1', '2', 'a<>:"|?*b', 'a/b/c.d.e'],
+      entryPoints: ['1', '2', 'a<>:"|?b', 'a/b/c.d.e'],
       bundle: true,
       write: false,
       outdir: testDir,
@@ -1004,7 +1004,7 @@ let pluginTests = {
     assert.strictEqual(result.outputFiles[3].path, path.join(testDir, 'a/b/c.d.js'))
     assert.strictEqual(result.outputFiles[0].text, `// virtual-ns:input 1\nconsole.log("input 1");\n`)
     assert.strictEqual(result.outputFiles[1].text, `// virtual-ns:input 2\nconsole.log("input 2");\n`)
-    assert.strictEqual(result.outputFiles[2].text, `// virtual-ns:input a<>:"|?*b\nconsole.log('input a<>:"|?*b');\n`)
+    assert.strictEqual(result.outputFiles[2].text, `// virtual-ns:input a<>:"|?b\nconsole.log('input a<>:"|?b');\n`)
     assert.strictEqual(result.outputFiles[3].text, `// virtual-ns:input a/b/c.d.e\nconsole.log("input a/b/c.d.e");\n`)
   },
 
@@ -1958,6 +1958,32 @@ let pluginTests = {
     assert.strictEqual(resolveKind, 'import-rule')
   },
 
+  async resolveKindComposesFrom({ esbuild }) {
+    let resolveKind = '<missing>'
+    try {
+      await esbuild.build({
+        entryPoints: ['entry'],
+        bundle: true,
+        write: false,
+        logLevel: 'silent',
+        plugins: [{
+          name: 'plugin',
+          setup(build) {
+            build.onResolve({ filter: /.*/ }, args => {
+              if (args.importer === '') return { path: args.path, namespace: 'ns' }
+              else resolveKind = args.kind
+            })
+            build.onLoad({ filter: /.*/, namespace: 'ns' }, () => {
+              return { contents: `.foo { composes: bar from 'entry' }`, loader: 'local-css' }
+            })
+          },
+        }],
+      })
+    } catch (e) {
+    }
+    assert.strictEqual(resolveKind, 'composes-from')
+  },
+
   async resolveKindURLToken({ esbuild }) {
     let resolveKind = '<missing>'
     try {
@@ -2120,6 +2146,25 @@ let pluginTests = {
       }],
     })
     assert.deepStrictEqual({ ...esbuildFromBuild }, { ...esbuild })
+  },
+
+  async onResolveSuffixWithoutPath({ esbuild, testDir }) {
+    const input = path.join(testDir, 'in.js')
+    await writeFileAsync(input, `works()`)
+    const result = await esbuild.build({
+      entryPoints: [input],
+      logLevel: 'silent',
+      write: false,
+      plugins: [{
+        name: 'the-plugin',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, () => ({ suffix: '?just suffix without path' }))
+        },
+      }],
+    })
+    assert.strictEqual(result.warnings.length, 1)
+    assert.strictEqual(result.warnings[0].text, `Returning "suffix" doesn't do anything when "path" is empty`)
+    assert.strictEqual(result.warnings[0].pluginName, 'the-plugin')
   },
 
   async onResolveInvalidPathSuffix({ esbuild }) {
@@ -2458,6 +2503,177 @@ error: Invalid path suffix "%what" returned from plugin (must start with "?" or 
       }],
     })
     assert.strictEqual(result.outputFiles[0].text, 'console.log(/* @__PURE__ */ jay_ess_ex("div", null));\n')
+  },
+
+  async importAttributesOnResolve({ esbuild }) {
+    const result = await esbuild.build({
+      entryPoints: ['entry'],
+      bundle: true,
+      format: 'esm',
+      charset: 'utf8',
+      write: false,
+      plugins: [{
+        name: 'name',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, args => {
+            if (args.with.type === 'cheese') return { path: 'cheese', namespace: 'ns' }
+            if (args.with.pizza === 'true') return { path: 'pizza', namespace: 'ns' }
+            return { path: args.path, namespace: 'ns' }
+          })
+          build.onLoad({ filter: /.*/ }, args => {
+            const entry = `
+              import a from 'foo' with { type: 'cheese' }
+              import b from 'foo' with { pizza: 'true' }
+              console.log(a, b)
+            `
+            if (args.path === 'entry') return { contents: entry }
+            if (args.path === 'cheese') return { contents: `export default "🧀"` }
+            if (args.path === 'pizza') return { contents: `export default "🍕"` }
+          })
+        },
+      }],
+    })
+    assert.strictEqual(result.outputFiles[0].text, `// ns:cheese
+var cheese_default = "🧀";
+
+// ns:pizza
+var pizza_default = "🍕";
+
+// ns:entry
+console.log(cheese_default, pizza_default);
+`)
+  },
+
+  async importAttributesOnLoad({ esbuild }) {
+    const result = await esbuild.build({
+      entryPoints: ['entry'],
+      bundle: true,
+      format: 'esm',
+      charset: 'utf8',
+      write: false,
+      plugins: [{
+        name: 'name',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, args => {
+            return { path: args.path, namespace: 'ns' }
+          })
+          build.onLoad({ filter: /.*/ }, args => {
+            const entry = `
+              import a from 'foo' with { type: 'cheese' }
+              import b from 'foo' with { pizza: 'true' }
+              console.log(a, b)
+            `
+            if (args.path === 'entry') return { contents: entry }
+            if (args.with.type === 'cheese') return { contents: `export default "🧀"` }
+            if (args.with.pizza === 'true') return { contents: `export default "🍕"` }
+          })
+        },
+      }],
+    })
+    assert.strictEqual(result.outputFiles[0].text, `// ns:foo with { type: 'cheese' }
+var foo_default = "🧀";
+
+// ns:foo with { pizza: 'true' }
+var foo_default2 = "🍕";
+
+// ns:entry
+console.log(foo_default, foo_default2);
+`)
+  },
+
+  async importAttributesOnLoadGlob({ esbuild, testDir }) {
+    const entry = path.join(testDir, 'entry.js')
+    const foo = path.join(testDir, 'foo.js')
+    await writeFileAsync(entry, `
+      Promise.all([
+        import('./foo' + js, { with: { type: 'cheese' } }),
+        import('./foo' + js, { with: { pizza: 'true' } }),
+      ]).then(resolve)
+    `)
+    await writeFileAsync(foo, `export default 123`)
+    const result = await esbuild.build({
+      entryPoints: [entry],
+      bundle: true,
+      format: 'esm',
+      charset: 'utf8',
+      write: false,
+      plugins: [{
+        name: 'name',
+        setup(build) {
+          build.onLoad({ filter: /.*/ }, args => {
+            if (args.with.type === 'cheese') return { contents: `export default "🧀"` }
+            if (args.with.pizza === 'true') return { contents: `export default "🍕"` }
+          })
+        },
+      }],
+    })
+    const callback = new Function('js', 'resolve', result.outputFiles[0].text)
+    const [cheese, pizza] = await new Promise(resolve => callback('.js', resolve))
+    assert.strictEqual(cheese.default, '🧀')
+    assert.strictEqual(pizza.default, '🍕')
+  },
+
+  async importAttributesResolve({ esbuild }) {
+    const onResolve = []
+    const resolve = []
+
+    await esbuild.build({
+      entryPoints: [],
+      bundle: true,
+      format: 'esm',
+      charset: 'utf8',
+      write: false,
+      plugins: [{
+        name: 'name',
+        setup(build) {
+          build.onResolve({ filter: /.*/ }, args => {
+            onResolve.push(args)
+            return { external: true }
+          })
+          build.onStart(async () => {
+            resolve.push(await build.resolve('foo', {
+              kind: 'require-call',
+              with: { type: 'cheese' },
+            }))
+            resolve.push(await build.resolve('bar', {
+              kind: 'import-statement',
+              with: { pizza: 'true' },
+            }))
+          })
+        },
+      }],
+    })
+
+    assert.strictEqual(onResolve.length, 2)
+    assert.strictEqual(onResolve[0].path, 'foo')
+    assert.strictEqual(onResolve[0].with.type, 'cheese')
+    assert.strictEqual(onResolve[1].path, 'bar')
+    assert.strictEqual(onResolve[1].with.pizza, 'true')
+
+    assert.strictEqual(resolve.length, 2)
+    assert.strictEqual(resolve[0].path, 'foo')
+    assert.strictEqual(resolve[0].external, true)
+    assert.strictEqual(resolve[1].path, 'bar')
+    assert.strictEqual(resolve[1].external, true)
+  },
+
+  async internalCrashIssue3634({ esbuild }) {
+    await esbuild.build({
+      entryPoints: [],
+      bundle: true,
+      plugins: [{
+        name: 'abc',
+        setup(build) {
+          build.onStart(async () => {
+            const result = await build.resolve('/foo', {
+              kind: 'require-call',
+              resolveDir: 'bar',
+            })
+            assert.strictEqual(result.errors.length, 1)
+          })
+        }
+      }],
+    })
   },
 }
 
@@ -3004,7 +3220,7 @@ let syncTests = {
 
       // Fetch once
       try {
-        await fetch(server.host, server.port, '/out.js')
+        await fetch(server.hosts[0], server.port, '/out.js')
         throw new Error('Expected an error to be thrown')
       } catch (err) {
         assert.strictEqual(err.statusCode, 503)
@@ -3016,7 +3232,7 @@ let syncTests = {
       await writeFileAsync(input, `console.log(1+2)`)
 
       // Fetch again
-      const buffer = await fetchUntilSuccessOrTimeout(server.host, server.port, '/out.js')
+      const buffer = await fetchUntilSuccessOrTimeout(server.hosts[0], server.port, '/out.js')
       assert.strictEqual(buffer.toString(), 'console.log(1 + 2);\n')
       assert.strictEqual(latestResult.errors.length, 0)
       assert.strictEqual(latestResult.outputFiles, undefined)
@@ -3054,7 +3270,7 @@ let syncTests = {
 
       // Fetch once
       try {
-        await fetch(server.host, server.port, '/out.js')
+        await fetch(server.hosts[0], server.port, '/out.js')
         throw new Error('Expected an error to be thrown')
       } catch (err) {
         assert.strictEqual(err.statusCode, 503)
@@ -3067,7 +3283,7 @@ let syncTests = {
       await writeFileAsync(input, `console.log(1+2)`)
 
       // Fetch again
-      const buffer = await fetchUntilSuccessOrTimeout(server.host, server.port, '/out.js')
+      const buffer = await fetchUntilSuccessOrTimeout(server.hosts[0], server.port, '/out.js')
       assert.strictEqual(buffer.toString(), 'console.log(1 + 2);\n')
       assert.strictEqual(latestResult.errors.length, 0)
       assert.strictEqual(latestResult.outputFiles.length, 1)

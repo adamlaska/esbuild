@@ -2,6 +2,7 @@ package css_ast
 
 import (
 	"strconv"
+	"strings"
 
 	"github.com/evanw/esbuild/internal/ast"
 	"github.com/evanw/esbuild/internal/css_lexer"
@@ -30,7 +31,51 @@ type AST struct {
 	Rules                []Rule
 	SourceMapComment     logger.Span
 	ApproximateLineCount int32
-	DefineLocs           map[ast.Ref]logger.Loc
+	LocalSymbols         []ast.LocRef
+	LocalScope           map[string]ast.LocRef
+	GlobalScope          map[string]ast.LocRef
+	Composes             map[ast.Ref]*Composes
+
+	// These contain all layer names in the file. It can be used to replace the
+	// layer-related side effects of importing this file. They are split into two
+	// groups (those before and after "@import" rules) so that the linker can put
+	// them in the right places.
+	LayersPreImport  [][]string
+	LayersPostImport [][]string
+}
+
+type Composes struct {
+	// Note that each of these can be either local or global. Local examples:
+	//
+	//   .foo { composes: bar }
+	//   .bar { color: red }
+	//
+	// Global examples:
+	//
+	//   .foo { composes: bar from global }
+	//   .foo :global { composes: bar }
+	//   .foo { :global { composes: bar } }
+	//   :global .bar { color: red }
+	//
+	Names []ast.LocRef
+
+	// Each of these is local in another file. For example:
+	//
+	//   .foo { composes: bar from "bar.css" }
+	//   .foo { composes: bar from url(bar.css) }
+	//
+	ImportedNames []ImportedComposesName
+
+	// This tracks what CSS properties each class uses so that we can warn when
+	// "composes" is used incorrectly to compose two classes from separate files
+	// that declare the same CSS properties.
+	Properties map[string]logger.Loc
+}
+
+type ImportedComposesName struct {
+	Alias             string
+	AliasLoc          logger.Loc
+	ImportRecordIndex uint32
 }
 
 // We create a lot of tokens, so make sure this layout is memory-efficient.
@@ -236,7 +281,37 @@ func TokensAreCommaSeparated(tokens []Token) bool {
 	return false
 }
 
-func (t Token) FractionForPercentage() (float64, bool) {
+type PercentageFlags uint8
+
+const (
+	AllowPercentageBelow0 PercentageFlags = 1 << iota
+	AllowPercentageAbove100
+	AllowAnyPercentage = AllowPercentageBelow0 | AllowPercentageAbove100
+)
+
+func (t Token) NumberOrFractionForPercentage(percentReferenceRange float64, flags PercentageFlags) (float64, bool) {
+	switch t.Kind {
+	case css_lexer.TNumber:
+		if f, err := strconv.ParseFloat(t.Text, 64); err == nil {
+			return f, true
+		}
+
+	case css_lexer.TPercentage:
+		if f, err := strconv.ParseFloat(t.PercentageValue(), 64); err == nil {
+			if (flags&AllowPercentageBelow0) == 0 && f < 0 {
+				return 0, true
+			}
+			if (flags&AllowPercentageAbove100) == 0 && f > 100 {
+				return percentReferenceRange, true
+			}
+			return f / 100 * percentReferenceRange, true
+		}
+	}
+
+	return 0, false
+}
+
+func (t Token) ClampedFractionForPercentage() (float64, bool) {
 	if t.Kind == css_lexer.TPercentage {
 		if f, err := strconv.ParseFloat(t.PercentageValue(), 64); err == nil {
 			if f < 0 {
@@ -245,9 +320,10 @@ func (t Token) FractionForPercentage() (float64, bool) {
 			if f > 100 {
 				return 1, true
 			}
-			return f / 100.0, true
+			return f / 100, true
 		}
 	}
+
 	return 0, false
 }
 
@@ -285,7 +361,7 @@ func (t Token) DimensionUnit() string {
 }
 
 func (t Token) DimensionUnitIsSafeLength() bool {
-	switch t.DimensionUnit() {
+	switch strings.ToLower(t.DimensionUnit()) {
 	// These units can be reasonably expected to be supported everywhere.
 	// Information used: https://developer.mozilla.org/en-US/docs/Web/CSS/length
 	case "cm", "em", "in", "mm", "pc", "pt", "px":
@@ -304,7 +380,7 @@ func (t Token) IsOne() bool {
 
 func (t Token) IsAngle() bool {
 	if t.Kind == css_lexer.TDimension {
-		unit := t.DimensionUnit()
+		unit := strings.ToLower(t.DimensionUnit())
 		return unit == "deg" || unit == "grad" || unit == "rad" || unit == "turn"
 	}
 	return false
@@ -325,7 +401,15 @@ func CloneTokensWithImportRecords(
 	tokensIn []Token, importRecordsIn []ast.ImportRecord,
 	tokensOut []Token, importRecordsOut []ast.ImportRecord,
 ) ([]Token, []ast.ImportRecord) {
+	// Preallocate the output array if we can
+	if tokensOut == nil {
+		tokensOut = make([]Token, 0, len(tokensIn))
+	}
+
 	for _, t := range tokensIn {
+		// Clear the source mapping if this token is being used in another file
+		t.Loc.Start = 0
+
 		// If this is a URL token, also clone the import record
 		if t.Kind == css_lexer.TURL {
 			importRecordIndex := uint32(len(importRecordsOut))
@@ -395,8 +479,41 @@ func (r *RAtCharset) Hash() (uint32, bool) {
 	return hash, true
 }
 
+type ImportConditions struct {
+	// The syntax for "@import" has been extended with optional conditions that
+	// behave as if the imported file was wrapped in a "@layer", "@supports",
+	// and/or "@media" rule. The possible syntax combinations are as follows:
+	//
+	//   @import url(...);
+	//   @import url(...) layer;
+	//   @import url(...) layer(layer-name);
+	//   @import url(...) layer(layer-name) supports(supports-condition);
+	//   @import url(...) layer(layer-name) supports(supports-condition) list-of-media-queries;
+	//   @import url(...) layer(layer-name) list-of-media-queries;
+	//   @import url(...) supports(supports-condition);
+	//   @import url(...) supports(supports-condition) list-of-media-queries;
+	//   @import url(...) list-of-media-queries;
+	//
+	// From: https://developer.mozilla.org/en-US/docs/Web/CSS/@import#syntax
+	Media []Token
+
+	// These two fields will only ever have zero or one tokens. However, they are
+	// implemented as arrays for convenience because most of esbuild's helper
+	// functions that operate on tokens take arrays instead of individual tokens.
+	Layers   []Token
+	Supports []Token
+}
+
+func (c *ImportConditions) CloneWithImportRecords(importRecordsIn []ast.ImportRecord, importRecordsOut []ast.ImportRecord) (ImportConditions, []ast.ImportRecord) {
+	result := ImportConditions{}
+	result.Layers, importRecordsOut = CloneTokensWithImportRecords(c.Layers, importRecordsIn, nil, importRecordsOut)
+	result.Supports, importRecordsOut = CloneTokensWithImportRecords(c.Supports, importRecordsIn, nil, importRecordsOut)
+	result.Media, importRecordsOut = CloneTokensWithImportRecords(c.Media, importRecordsIn, nil, importRecordsOut)
+	return result, importRecordsOut
+}
+
 type RAtImport struct {
-	ImportConditions  []Token
+	ImportConditions  *ImportConditions
 	ImportRecordIndex uint32
 }
 
@@ -423,7 +540,7 @@ type KeyframeBlock struct {
 }
 
 func (a *RAtKeyframes) Equal(rule R, check *CrossFileEqualityCheck) bool {
-	if b, ok := rule.(*RAtKeyframes); ok && a.AtToken == b.AtToken && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref) && len(a.Blocks) == len(b.Blocks) {
+	if b, ok := rule.(*RAtKeyframes); ok && strings.EqualFold(a.AtToken, b.AtToken) && check.RefsAreEquivalent(a.Name.Ref, b.Name.Ref) && len(a.Blocks) == len(b.Blocks) {
 		for i, ai := range a.Blocks {
 			bi := b.Blocks[i]
 			if len(ai.Selectors) != len(bi.Selectors) {
@@ -466,7 +583,7 @@ type RKnownAt struct {
 
 func (a *RKnownAt) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RKnownAt)
-	return ok && a.AtToken == b.AtToken && TokensEqual(a.Prelude, b.Prelude, check) && RulesEqual(a.Rules, b.Rules, check)
+	return ok && strings.EqualFold(a.AtToken, b.AtToken) && TokensEqual(a.Prelude, b.Prelude, check) && RulesEqual(a.Rules, b.Rules, check)
 }
 
 func (r *RKnownAt) Hash() (uint32, bool) {
@@ -485,7 +602,7 @@ type RUnknownAt struct {
 
 func (a *RUnknownAt) Equal(rule R, check *CrossFileEqualityCheck) bool {
 	b, ok := rule.(*RUnknownAt)
-	return ok && a.AtToken == b.AtToken && TokensEqual(a.Prelude, b.Prelude, check) && TokensEqual(a.Block, b.Block, check)
+	return ok && strings.EqualFold(a.AtToken, b.AtToken) && TokensEqual(a.Prelude, b.Prelude, check) && TokensEqual(a.Block, b.Block, check)
 }
 
 func (r *RUnknownAt) Hash() (uint32, bool) {
@@ -671,33 +788,39 @@ func HashComplexSelectors(hash uint32, selectors []ComplexSelector) uint32 {
 	return hash
 }
 
-func (s ComplexSelector) CloneWithoutLeadingCombinator() ComplexSelector {
+func (s ComplexSelector) Clone() ComplexSelector {
 	clone := ComplexSelector{Selectors: make([]CompoundSelector, len(s.Selectors))}
 	for i, sel := range s.Selectors {
-		if i == 0 {
-			sel.Combinator = Combinator{}
-		}
 		clone.Selectors[i] = sel.Clone()
 	}
 	return clone
 }
 
-func (sel ComplexSelector) IsRelative() bool {
-	if sel.Selectors[0].Combinator.Byte == 0 {
-		for _, inner := range sel.Selectors {
-			if inner.HasNestingSelector() {
-				return false
-			}
-			for _, ss := range inner.SubclassSelectors {
-				if pseudo, ok := ss.Data.(*SSPseudoClassWithSelectorList); ok {
-					for _, nested := range pseudo.Selectors {
-						if !nested.IsRelative() {
-							return false
-						}
+func (sel ComplexSelector) ContainsNestingCombinator() bool {
+	for _, inner := range sel.Selectors {
+		if len(inner.NestingSelectorLocs) > 0 {
+			return true
+		}
+		for _, ss := range inner.SubclassSelectors {
+			if pseudo, ok := ss.Data.(*SSPseudoClassWithSelectorList); ok {
+				for _, nested := range pseudo.Selectors {
+					if nested.ContainsNestingCombinator() {
+						return true
 					}
 				}
 			}
 		}
+	}
+	return false
+}
+
+func (sel ComplexSelector) IsRelative() bool {
+	// https://www.w3.org/TR/css-nesting-1/#syntax
+	// "If a selector in the <relative-selector-list> does not start with a
+	// combinator but does contain the nesting selector, it is interpreted
+	// as a non-relative selector."
+	if sel.Selectors[0].Combinator.Byte == 0 && sel.ContainsNestingCombinator() {
+		return false
 	}
 	return true
 }
@@ -744,7 +867,7 @@ func (a ComplexSelector) Equal(b ComplexSelector, check *CrossFileEqualityCheck)
 
 	for i, ai := range a.Selectors {
 		bi := b.Selectors[i]
-		if ai.HasNestingSelector() != bi.HasNestingSelector() || ai.Combinator.Byte != bi.Combinator.Byte {
+		if len(ai.NestingSelectorLocs) != len(bi.NestingSelectorLocs) || ai.Combinator.Byte != bi.Combinator.Byte {
 			return false
 		}
 
@@ -773,38 +896,39 @@ type Combinator struct {
 }
 
 type CompoundSelector struct {
-	TypeSelector       *NamespacedName
-	SubclassSelectors  []SubclassSelector
-	NestingSelectorLoc ast.Index32 // "&"
-	Combinator         Combinator  // Optional, may be 0
+	TypeSelector        *NamespacedName
+	SubclassSelectors   []SubclassSelector
+	NestingSelectorLocs []logger.Loc // "&" vs. "&&" is different specificity
+	Combinator          Combinator   // Optional, may be 0
 
 	// If this is true, this is a "&" that was generated by a bare ":local" or ":global"
 	WasEmptyFromLocalOrGlobal bool
 }
 
-func (sel *CompoundSelector) HasNestingSelector() bool {
-	return sel.NestingSelectorLoc.IsValid()
-}
-
 func (sel CompoundSelector) IsSingleAmpersand() bool {
-	return sel.HasNestingSelector() && sel.Combinator.Byte == 0 && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
+	return len(sel.NestingSelectorLocs) == 1 && sel.Combinator.Byte == 0 && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
 }
 
 func (sel CompoundSelector) IsInvalidBecauseEmpty() bool {
-	return !sel.HasNestingSelector() && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
+	return len(sel.NestingSelectorLocs) == 0 && sel.TypeSelector == nil && len(sel.SubclassSelectors) == 0
 }
 
-func (sel CompoundSelector) FirstLoc() logger.Loc {
-	var firstLoc ast.Index32
+func (sel CompoundSelector) Range() (r logger.Range) {
+	if sel.Combinator.Byte != 0 {
+		r = logger.Range{Loc: sel.Combinator.Loc, Len: 1}
+	}
 	if sel.TypeSelector != nil {
-		firstLoc = ast.MakeIndex32(uint32(sel.TypeSelector.FirstLoc().Start))
-	} else if len(sel.SubclassSelectors) > 0 {
-		firstLoc = ast.MakeIndex32(uint32(sel.SubclassSelectors[0].Loc.Start))
+		r.ExpandBy(sel.TypeSelector.Range())
 	}
-	if firstLoc.IsValid() && (!sel.NestingSelectorLoc.IsValid() || firstLoc.GetIndex() < sel.NestingSelectorLoc.GetIndex()) {
-		return logger.Loc{Start: int32(firstLoc.GetIndex())}
+	for _, loc := range sel.NestingSelectorLocs {
+		r.ExpandBy(logger.Range{Loc: loc, Len: 1})
 	}
-	return logger.Loc{Start: int32(sel.NestingSelectorLoc.GetIndex())}
+	if len(sel.SubclassSelectors) > 0 {
+		for _, ss := range sel.SubclassSelectors {
+			r.ExpandBy(ss.Range)
+		}
+	}
+	return
 }
 
 func (sel CompoundSelector) Clone() CompoundSelector {
@@ -828,9 +952,9 @@ func (sel CompoundSelector) Clone() CompoundSelector {
 }
 
 type NameToken struct {
-	Text string
-	Loc  logger.Loc
-	Kind css_lexer.T
+	Text  string
+	Range logger.Range
+	Kind  css_lexer.T
 }
 
 func (a NameToken) Equal(b NameToken) bool {
@@ -845,11 +969,12 @@ type NamespacedName struct {
 	Name NameToken
 }
 
-func (n NamespacedName) FirstLoc() logger.Loc {
+func (n NamespacedName) Range() logger.Range {
 	if n.NamespacePrefix != nil {
-		return n.NamespacePrefix.Loc
+		loc := n.NamespacePrefix.Range.Loc
+		return logger.Range{Loc: loc, Len: n.Name.Range.End() - loc.Start}
 	}
-	return n.Name.Loc
+	return n.Name.Range
 }
 
 func (n NamespacedName) Clone() NamespacedName {
@@ -867,8 +992,8 @@ func (a NamespacedName) Equal(b NamespacedName) bool {
 }
 
 type SubclassSelector struct {
-	Data SS
-	Loc  logger.Loc
+	Data  SS
+	Range logger.Range
 }
 
 type SS interface {
@@ -1076,7 +1201,7 @@ func (ss *SSPseudoClassWithSelectorList) Clone() SS {
 	clone := *ss
 	clone.Selectors = make([]ComplexSelector, len(ss.Selectors))
 	for i, sel := range ss.Selectors {
-		clone.Selectors[i] = sel.CloneWithoutLeadingCombinator()
+		clone.Selectors[i] = sel.Clone()
 	}
 	return &clone
 }

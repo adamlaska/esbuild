@@ -486,7 +486,7 @@ func TestTsconfigPathsMissingBaseURL(t *testing.T) {
 			AbsOutputFile: "/Users/user/project/out.js",
 		},
 		expectedScanLog: `Users/user/project/src/entry.ts: ERROR: Could not resolve "#/test"
-NOTE: You can mark the path "#/test" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "#/test" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 `,
 	})
 }
@@ -1663,7 +1663,7 @@ func TestTsconfigNoBaseURLExtendsPaths(t *testing.T) {
 		},
 		expectedScanLog: `Users/user/project/base/defaults.json: WARNING: Non-relative path "lib/*" is not allowed when "baseUrl" is not set (did you forget a leading "./"?)
 Users/user/project/src/entry.ts: ERROR: Could not resolve "foo"
-NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 `,
 	})
 }
@@ -2451,6 +2451,476 @@ func TestTsconfigIgnoreInsideNodeModules(t *testing.T) {
 			`,
 		},
 		entryPaths: []string{"/Users/user/project/src/main.ts"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/Users/user/project/out",
+		},
+	})
+}
+
+func TestTsconfigJsonPackagesExternal(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import truePkg from 'pkg1'
+				import falsePkg from 'internal/pkg2'
+				truePkg()
+				falsePkg()
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"internal/*": ["./stuff/*"]
+						}
+					}
+				}
+			`,
+			"/Users/user/project/src/stuff/pkg2.js": `
+				export default success
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			AbsOutputFile:    "/Users/user/project/out.js",
+			ExternalPackages: true,
+		},
+	})
+}
+
+func TestTsconfigJsonTopLevelMistakeWarning(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				@foo
+				class Foo {}
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"experimentalDecorators": true
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+		expectedScanLog: `Users/user/project/src/tsconfig.json: WARNING: Expected the "experimentalDecorators" option to be nested inside a "compilerOptions" object
+`,
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/3307
+func TestTsconfigJsonBaseUrlIssue3307(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": "./subdir"
+					}
+				}
+			`,
+			"/Users/user/project/src/test.ts": `
+				export const foo = "well, this is correct...";
+			`,
+			"/Users/user/project/src/subdir/test.ts": `
+				export const foo = "WRONG";
+			`,
+		},
+		entryPaths:    []string{"test.ts"},
+		absWorkingDir: "/Users/user/project/src",
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/3354
+func TestTsconfigJsonAsteriskNameCollisionIssue3354(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				import {foo} from "foo";
+				foo();
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": ".",
+						"paths": {
+							"*": ["web/*"]
+						}
+					}
+				}
+			`,
+			"/Users/user/project/src/web/foo.ts": `
+				import {foo as barFoo} from 'bar/foo';
+				export function foo() {
+					console.log('web/foo');
+					barFoo();
+				}
+			`,
+			"/Users/user/project/src/web/bar/foo/foo.ts": `
+				export function foo() {
+					console.log('bar/foo');
+				}
+			`,
+			"/Users/user/project/src/web/bar/foo/index.ts": `
+				export {foo} from './foo'
+			`,
+		},
+		entryPaths:    []string{"entry.ts"},
+		absWorkingDir: "/Users/user/project/src",
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/3698
+func TestTsconfigPackageJsonExportsYarnPnP(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/packages/app/index.tsx": `
+				console.log(<div/>)
+			`,
+			"/Users/user/project/packages/app/tsconfig.json": `
+				{
+					"extends": "tsconfigs/config"
+				}
+			`,
+			"/Users/user/project/packages/tsconfigs/package.json": `
+				{
+					"exports": {
+						"./config": "./configs/tsconfig.json"
+					}
+				}
+			`,
+			"/Users/user/project/packages/tsconfigs/configs/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"jsxFactory": "success"
+					}
+				}
+			`,
+			"/Users/user/project/.pnp.data.json": `
+				{
+					"packageRegistryData": [
+						[
+							"app",
+							[
+								[
+									"workspace:packages/app",
+									{
+										"packageLocation": "./packages/app/",
+										"packageDependencies": [
+											[
+												"tsconfigs",
+												"workspace:packages/tsconfigs"
+											]
+										],
+										"linkType": "SOFT"
+									}
+								]
+							]
+						],
+						[
+							"tsconfigs",
+							[
+								[
+									"workspace:packages/tsconfigs",
+									{
+										"packageLocation": "./packages/tsconfigs/",
+										"packageDependencies": [],
+										"linkType": "SOFT"
+									}
+								]
+							]
+						]
+					]
+				}
+			`,
+		},
+		entryPaths:    []string{"/Users/user/project/packages/app/index.tsx"},
+		absWorkingDir: "/Users/user/project",
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsconfigJsonConfigDirBaseURL(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import "foo/bar"
+			`,
+			"/Users/user/project/lib/foo/bar": `
+				console.log('works')
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"extends": "@scope/configs/tsconfig"
+				}
+			`,
+			"/Users/user/project/node_modules/@scope/configs/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": "${configDir}../lib"
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsconfigJsonConfigDirPaths(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import "library/foo/bar"
+			`,
+			"/Users/user/project/lib/foo/bar": `
+				console.log('works')
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"extends": "@scope/configs/tsconfig"
+				}
+			`,
+			"/Users/user/project/node_modules/@scope/configs/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"paths": {
+							"library/*": ["${configDir}../lib/*"]
+						}
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsconfigJsonConfigDirBaseURLInheritedPaths(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.js": `
+				import "library/foo/bar"
+			`,
+			"/Users/user/project/lib/foo/bar": `
+				console.log('works')
+			`,
+			"/Users/user/project/src/tsconfig.json": `
+				{
+					"extends": "@scope/configs/tsconfig"
+				}
+			`,
+			"/Users/user/project/node_modules/@scope/configs/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"baseUrl": "${configDir}..",
+						"paths": {
+							"library/*": ["./lib/*"]
+						}
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/src/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/3915
+func TestTsconfigStackOverflowYarnPnP(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/entry.jsx": `
+				console.log(<div />)
+			`,
+			"/Users/user/project/tsconfig.json": `
+				{
+					"extends": "tsconfigs/config"
+				}
+			`,
+			"/Users/user/project/packages/tsconfigs/package.json": `
+				{
+					"exports": {
+						"./config": "./configs/tsconfig.json"
+					}
+				}
+			`,
+			"/Users/user/project/packages/tsconfigs/configs/tsconfig.json": `
+				{
+					"compilerOptions": {
+						"jsxFactory": "success"
+					}
+				}
+			`,
+			"/Users/user/project/.pnp.data.json": `
+				{
+					"packageRegistryData": [
+						[null, [
+							[null, {
+								"packageLocation": "./",
+								"packageDependencies": [
+									["tsconfigs", "virtual:some-path"]
+								],
+								"linkType": "SOFT"
+							}]
+						]],
+						["tsconfigs", [
+							["virtual:some-path", {
+								"packageLocation": "./packages/tsconfigs/",
+								"packageDependencies": [
+									["tsconfigs", "virtual:some-path"]
+								],
+								"packagePeers": [],
+								"linkType": "SOFT"
+							}],
+							["workspace:packages/tsconfigs", {
+								"packageLocation": "./packages/tsconfigs/",
+								"packageDependencies": [
+									["tsconfigs", "workspace:packages/tsconfigs"]
+								],
+								"linkType": "SOFT"
+							}]
+						]]
+					]
+				}
+			`,
+		},
+		entryPaths:    []string{"/Users/user/project/entry.jsx"},
+		absWorkingDir: "/Users/user/project",
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/Users/user/project/out.js",
+		},
+	})
+}
+
+func TestTsconfigJsonExtendsArrayIssue3898(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/index.tsx": `
+				import { type SomeType } from 'MUST_KEEP'
+				console.log(<>
+					<div/>
+				</>)
+			`,
+			"/Users/user/project/tsconfig.json": `
+				{
+					"extends": [
+						"./tsconfigs/a.json",
+						"./tsconfigs/b.json",
+					]
+				}
+			`,
+			"/Users/user/project/tsconfigs/base.json": `
+				{
+					"compilerOptions": {
+						"verbatimModuleSyntax": true,
+					}
+				}
+			`,
+			"/Users/user/project/tsconfigs/a.json": `
+				{
+					"extends": "./base.json",
+					"compilerOptions": {
+						"jsxFactory": "SUCCESS",
+					}
+				}
+			`,
+			"/Users/user/project/tsconfigs/b.json": `
+				{
+					"extends": "./base.json",
+					"compilerOptions": {
+						"jsxFragmentFactory": "WORKS",
+					}
+				}
+			`,
+		},
+		entryPaths: []string{"/Users/user/project/index.tsx"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
+			AbsOutputFile: "/Users/user/project/out.js",
+			JSX: config.JSXOptions{
+				SideEffects: true,
+			},
+		},
+	})
+}
+
+func TestTsconfigDecoratorsUseDefineForClassFieldsFalse(t *testing.T) {
+	tsconfig_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/Users/user/project/src/entry.ts": `
+				class Class {
+				}
+				class ClassMethod {
+					foo() {}
+				}
+				class ClassField {
+					foo = 123
+					bar
+				}
+				class ClassAccessor {
+					accessor foo = 123
+					accessor bar
+				}
+				new Class
+				new ClassMethod
+				new ClassField
+				new ClassAccessor
+			`,
+			"/Users/user/project/src/entrywithdec.ts": `
+				@dec class Class {
+				}
+				class ClassMethod {
+					@dec foo() {}
+				}
+				class ClassField {
+					@dec foo = 123
+					@dec bar
+				}
+				class ClassAccessor {
+					@dec accessor foo = 123
+					@dec accessor bar
+				}
+				new Class
+				new ClassMethod
+				new ClassField
+				new ClassAccessor
+			`,
+			"/Users/user/project/src/tsconfig.json": `{
+				"compilerOptions": {
+					"useDefineForClassFields": false
+				}
+			}`,
+		},
+		entryPaths: []string{
+			"/Users/user/project/src/entry.ts",
+			"/Users/user/project/src/entrywithdec.ts",
+		},
 		options: config.Options{
 			Mode:         config.ModeBundle,
 			AbsOutputDir: "/Users/user/project/out",

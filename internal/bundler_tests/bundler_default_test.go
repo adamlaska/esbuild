@@ -1291,7 +1291,7 @@ func TestImportInsideTry(t *testing.T) {
 			AbsOutputFile: "/out.js",
 		},
 		expectedScanLog: `entry.js: ERROR: Could not resolve "nope1"
-NOTE: You can mark the path "nope1" as external to exclude it from the bundle, which will remove this error. You can also add ".catch()" here to handle this failure at run-time instead of bundle-time.
+NOTE: You can mark the path "nope1" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle. You can also add ".catch()" here to handle this failure at run-time instead of bundle-time.
 `,
 	})
 }
@@ -1669,6 +1669,31 @@ func TestExportWildcardFSNodeCommonJS(t *testing.T) {
 					},
 				},
 			},
+		},
+	})
+}
+
+// https://github.com/evanw/esbuild/issues/3544
+func TestNodeAnnotationFalsePositiveIssue3544(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.mjs": `
+				export function confuseNode(exports) {
+					// If this local is called "exports", node incorrectly
+					// thinks this file has an export called "notAnExport".
+					// We must make sure that it doesn't have that name
+					// when targeting Node with CommonJS.
+					exports.notAnExport = function() {
+					};
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.mjs"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			OutputFormat:  config.FormatCommonJS,
+			AbsOutputFile: "/out.js",
+			Platform:      config.PlatformNode,
 		},
 	})
 }
@@ -2295,17 +2320,17 @@ func TestExternalModuleExclusionScopedPackage(t *testing.T) {
 			},
 		},
 		expectedScanLog: `index.js: ERROR: Could not resolve "@a1-a2"
-NOTE: You can mark the path "@a1-a2" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "@a1-a2" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 index.js: ERROR: Could not resolve "@b1"
-NOTE: You can mark the path "@b1" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "@b1" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 index.js: ERROR: Could not resolve "@b1/b2-b3"
-NOTE: You can mark the path "@b1/b2-b3" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "@b1/b2-b3" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 index.js: ERROR: Could not resolve "@c1"
-NOTE: You can mark the path "@c1" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "@c1" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 index.js: ERROR: Could not resolve "@c1/c2"
-NOTE: You can mark the path "@c1/c2" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "@c1/c2" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 index.js: ERROR: Could not resolve "@c1/c2/c3-c4"
-NOTE: You can mark the path "@c1/c2/c3-c4" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "@c1/c2/c3-c4" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 `,
 	})
 }
@@ -3264,6 +3289,7 @@ func TestImportMetaNoBundle(t *testing.T) {
 func TestLegalCommentsNone(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
+			"/empty.js": ``,
 			"/entry.js": `
 				import './a'
 				import './b'
@@ -3273,6 +3299,7 @@ func TestLegalCommentsNone(t *testing.T) {
 			"/b.js": `console.log('in b') //! Copyright notice 1`,
 			"/c.js": `console.log('in c') //! Copyright notice 2`,
 
+			"/empty.css": ``,
 			"/entry.css": `
 				@import "./a.css";
 				@import "./b.css";
@@ -3282,7 +3309,12 @@ func TestLegalCommentsNone(t *testing.T) {
 			"/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
 			"/c.css": `c { zoom: 2 } /*! Copyright notice 2 */`,
 		},
-		entryPaths: []string{"/entry.js", "/entry.css"},
+		entryPaths: []string{
+			"/entry.js",
+			"/entry.css",
+			"/empty.js",
+			"/empty.css",
+		},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputDir:  "/out",
@@ -3294,6 +3326,7 @@ func TestLegalCommentsNone(t *testing.T) {
 func TestLegalCommentsInline(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
+			"/empty.js": ``,
 			"/entry.js": `
 				import './a'
 				import './b'
@@ -3303,6 +3336,7 @@ func TestLegalCommentsInline(t *testing.T) {
 			"/b.js": `console.log('in b') //! Copyright notice 1`,
 			"/c.js": `console.log('in c') //! Copyright notice 2`,
 
+			"/empty.css": ``,
 			"/entry.css": `
 				@import "./a.css";
 				@import "./b.css";
@@ -3312,7 +3346,12 @@ func TestLegalCommentsInline(t *testing.T) {
 			"/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
 			"/c.css": `c { zoom: 2 } /*! Copyright notice 2 */`,
 		},
-		entryPaths: []string{"/entry.js", "/entry.css"},
+		entryPaths: []string{
+			"/entry.js",
+			"/entry.css",
+			"/empty.js",
+			"/empty.css",
+		},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputDir:  "/out",
@@ -3324,6 +3363,7 @@ func TestLegalCommentsInline(t *testing.T) {
 func TestLegalCommentsEndOfFile(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
+			"/empty.js": ``,
 			"/entry.js": `
 				import './a'
 				import './b'
@@ -3333,6 +3373,7 @@ func TestLegalCommentsEndOfFile(t *testing.T) {
 			"/b.js": `console.log('in b') //! Copyright notice 1`,
 			"/c.js": `console.log('in c') //! Copyright notice 2`,
 
+			"/empty.css": ``,
 			"/entry.css": `
 				@import "./a.css";
 				@import "./b.css";
@@ -3342,7 +3383,12 @@ func TestLegalCommentsEndOfFile(t *testing.T) {
 			"/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
 			"/c.css": `c { zoom: 2 } /*! Copyright notice 2 */`,
 		},
-		entryPaths: []string{"/entry.js", "/entry.css"},
+		entryPaths: []string{
+			"/entry.js",
+			"/entry.css",
+			"/empty.js",
+			"/empty.css",
+		},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputDir:  "/out",
@@ -3354,6 +3400,7 @@ func TestLegalCommentsEndOfFile(t *testing.T) {
 func TestLegalCommentsLinked(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
+			"/empty.js": ``,
 			"/entry.js": `
 				import './a'
 				import './b'
@@ -3363,6 +3410,7 @@ func TestLegalCommentsLinked(t *testing.T) {
 			"/b.js": `console.log('in b') //! Copyright notice 1`,
 			"/c.js": `console.log('in c') //! Copyright notice 2`,
 
+			"/empty.css": ``,
 			"/entry.css": `
 				@import "./a.css";
 				@import "./b.css";
@@ -3372,7 +3420,12 @@ func TestLegalCommentsLinked(t *testing.T) {
 			"/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
 			"/c.css": `c { zoom: 2 } /*! Copyright notice 2 */`,
 		},
-		entryPaths: []string{"/entry.js", "/entry.css"},
+		entryPaths: []string{
+			"/entry.js",
+			"/entry.css",
+			"/empty.js",
+			"/empty.css",
+		},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputDir:  "/out",
@@ -3384,6 +3437,7 @@ func TestLegalCommentsLinked(t *testing.T) {
 func TestLegalCommentsExternal(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
+			"/empty.js": ``,
 			"/entry.js": `
 				import './a'
 				import './b'
@@ -3393,6 +3447,7 @@ func TestLegalCommentsExternal(t *testing.T) {
 			"/b.js": `console.log('in b') //! Copyright notice 1`,
 			"/c.js": `console.log('in c') //! Copyright notice 2`,
 
+			"/empty.css": ``,
 			"/entry.css": `
 				@import "./a.css";
 				@import "./b.css";
@@ -3402,7 +3457,12 @@ func TestLegalCommentsExternal(t *testing.T) {
 			"/b.css": `b { zoom: 2 } /*! Copyright notice 1 */`,
 			"/c.css": `c { zoom: 2 } /*! Copyright notice 2 */`,
 		},
-		entryPaths: []string{"/entry.js", "/entry.css"},
+		entryPaths: []string{
+			"/entry.js",
+			"/entry.css",
+			"/empty.js",
+			"/empty.css",
+		},
 		options: config.Options{
 			Mode:          config.ModeBundle,
 			AbsOutputDir:  "/out",
@@ -4059,6 +4119,7 @@ func TestTopLevelAwaitForbiddenRequire(t *testing.T) {
 				await 0
 			`,
 			"/a.js": `
+				import './something' // Deliberately offset the import record index
 				import './b'
 			`,
 			"/b.js": `
@@ -4067,6 +4128,7 @@ func TestTopLevelAwaitForbiddenRequire(t *testing.T) {
 			"/c.js": `
 				await 0
 			`,
+			"/something.js": ``,
 		},
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
@@ -4591,23 +4653,27 @@ func TestInjectDuplicate(t *testing.T) {
 }
 
 func TestInject(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"chain.prop": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"chain", "prop"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"replace"},
 			},
 		},
-		"obj.defined": {
+		{
+			KeyParts: []string{"obj", "defined"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.EString{Value: helpers.StringToUTF16("defined")},
 			},
 		},
-		"injectedAndDefined": {
+		{
+			KeyParts: []string{"injectedAndDefined"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.EString{Value: helpers.StringToUTF16("should be used")},
 			},
 		},
-		"injected.and.defined": {
+		{
+			KeyParts: []string{"injected", "and", "defined"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.EString{Value: helpers.StringToUTF16("should be used")},
 			},
@@ -4687,23 +4753,27 @@ func TestInject(t *testing.T) {
 }
 
 func TestInjectNoBundle(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"chain.prop": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"chain", "prop"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"replace"},
 			},
 		},
-		"obj.defined": {
+		{
+			KeyParts: []string{"obj", "defined"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.EString{Value: helpers.StringToUTF16("defined")},
 			},
 		},
-		"injectedAndDefined": {
+		{
+			KeyParts: []string{"injectedAndDefined"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.EString{Value: helpers.StringToUTF16("should be used")},
 			},
 		},
-		"injected.and.defined": {
+		{
+			KeyParts: []string{"injected", "and", "defined"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.EString{Value: helpers.StringToUTF16("should be used")},
 			},
@@ -4777,13 +4847,15 @@ func TestInjectNoBundle(t *testing.T) {
 }
 
 func TestInjectJSX(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"React.createElement": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"React", "createElement"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"el"},
 			},
 		},
-		"React.Fragment": {
+		{
+			KeyParts: []string{"React", "Fragment"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"frag"},
 			},
@@ -4900,9 +4972,10 @@ func TestInjectImportOrder(t *testing.T) {
 }
 
 func TestInjectAssign(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"defined": {DefineExpr: &config.DefineExpr{Parts: []string{"some", "define"}}},
-	})
+	defines := config.ProcessDefines([]config.DefineData{{
+		KeyParts:   []string{"defined"},
+		DefineExpr: &config.DefineExpr{Parts: []string{"some", "define"}},
+	}})
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -4977,9 +5050,9 @@ func TestInjectWithDefine(t *testing.T) {
 					"both":  {DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: helpers.StringToUTF16("define")}}},
 					"first": {DefineExpr: &config.DefineExpr{Parts: []string{"second"}}},
 				},
-				DotDefines: map[string][]config.DotDefine{
-					"th": {{Parts: []string{"bo", "th"}, Data: config.DefineData{DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: helpers.StringToUTF16("defi.ne")}}}}},
-					"st": {{Parts: []string{"fir", "st"}, Data: config.DefineData{DefineExpr: &config.DefineExpr{Parts: []string{"seco", "nd"}}}}},
+				DotDefines: map[string][]config.DefineData{
+					"th": {{KeyParts: []string{"bo", "th"}, DefineExpr: &config.DefineExpr{Constant: &js_ast.EString{Value: helpers.StringToUTF16("defi.ne")}}}},
+					"st": {{KeyParts: []string{"fir", "st"}, DefineExpr: &config.DefineExpr{Parts: []string{"seco", "nd"}}}},
 				},
 			},
 		},
@@ -5048,18 +5121,21 @@ func TestAvoidTDZNoBundle(t *testing.T) {
 }
 
 func TestDefineImportMeta(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"import.meta": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"import", "meta"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 1},
 			},
 		},
-		"import.meta.foo": {
+		{
+			KeyParts: []string{"import", "meta", "foo"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 2},
 			},
 		},
-		"import.meta.foo.bar": {
+		{
+			KeyParts: []string{"import", "meta", "foo", "bar"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 3},
 			},
@@ -5092,8 +5168,9 @@ func TestDefineImportMeta(t *testing.T) {
 }
 
 func TestDefineImportMetaES5(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"import.meta.x": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"import", "meta", "x"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 1},
 			},
@@ -5166,18 +5243,21 @@ func TestInjectImportMeta(t *testing.T) {
 }
 
 func TestDefineThis(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"this": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"this"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 1},
 			},
 		},
-		"this.foo": {
+		{
+			KeyParts: []string{"this", "foo"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 2},
 			},
 		},
-		"this.foo.bar": {
+		{
+			KeyParts: []string{"this", "foo", "bar"},
 			DefineExpr: &config.DefineExpr{
 				Constant: &js_ast.ENumber{Value: 3},
 			},
@@ -5232,13 +5312,12 @@ func TestDefineThis(t *testing.T) {
 }
 
 func TestDefineOptionalChain(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"a.b.c": {
-			DefineExpr: &config.DefineExpr{
-				Constant: &js_ast.ENumber{Value: 1},
-			},
+	defines := config.ProcessDefines([]config.DefineData{{
+		KeyParts: []string{"a", "b", "c"},
+		DefineExpr: &config.DefineExpr{
+			Constant: &js_ast.ENumber{Value: 1},
 		},
-	})
+	}})
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -5267,13 +5346,12 @@ func TestDefineOptionalChain(t *testing.T) {
 }
 
 func TestDefineOptionalChainLowered(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"a.b.c": {
-			DefineExpr: &config.DefineExpr{
-				Constant: &js_ast.ENumber{Value: 1},
-			},
+	defines := config.ProcessDefines([]config.DefineData{{
+		KeyParts: []string{"a", "b", "c"},
+		DefineExpr: &config.DefineExpr{
+			Constant: &js_ast.ENumber{Value: 1},
 		},
-	})
+	}})
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/entry.js": `
@@ -5302,25 +5380,89 @@ func TestDefineOptionalChainLowered(t *testing.T) {
 	})
 }
 
+// See: https://github.com/evanw/esbuild/issues/3551
+func TestDefineOptionalChainPanicIssue3551(t *testing.T) {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"x"},
+			DefineExpr: &config.DefineExpr{
+				Constant: &js_ast.ENumber{Value: 1},
+			},
+		},
+		{
+			KeyParts: []string{"a", "b"},
+			DefineExpr: &config.DefineExpr{
+				Constant: &js_ast.ENumber{Value: 1},
+			},
+		},
+	})
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/id-define.js": `
+				x?.y.z;
+				(x?.y).z;
+				x?.y["z"];
+				(x?.y)["z"];
+				x?.y();
+				(x?.y)();
+				x?.y.z();
+				(x?.y).z();
+				x?.y["z"]();
+				(x?.y)["z"]();
+				delete x?.y.z;
+				delete (x?.y).z;
+				delete x?.y["z"];
+				delete (x?.y)["z"];
+			`,
+			"/dot-define.js": `
+				a?.b.c;
+				(a?.b).c;
+				a?.b["c"];
+				(a?.b)["c"];
+				a?.b();
+				(a?.b)();
+				a?.b.c();
+				(a?.b).c();
+				a?.b["c"]();
+				(a?.b)["c"]();
+				delete a?.b.c;
+				delete (a?.b).c;
+				delete a?.b["c"];
+				delete (a?.b)["c"];
+			`,
+		},
+		entryPaths: []string{"/id-define.js", "/dot-define.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			Defines:      &defines,
+		},
+	})
+}
+
 // See: https://github.com/evanw/esbuild/issues/2407
 func TestDefineInfiniteLoopIssue2407(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"a.b": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"a", "b"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"b", "c"},
 			},
 		},
-		"b.c": {
+		{
+			KeyParts: []string{"b", "c"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"c", "a"},
 			},
 		},
-		"c.a": {
+		{
+			KeyParts: []string{"c", "a"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"a", "b"},
 			},
 		},
-		"x.y": {
+		{
+			KeyParts: []string{"x", "y"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"y"},
 			},
@@ -5343,33 +5485,39 @@ func TestDefineInfiniteLoopIssue2407(t *testing.T) {
 }
 
 func TestDefineAssignWarning(t *testing.T) {
-	defines := config.ProcessDefines(map[string]config.DefineData{
-		"a": {
+	defines := config.ProcessDefines([]config.DefineData{
+		{
+			KeyParts: []string{"a"},
 			DefineExpr: &config.DefineExpr{
 				Constant: js_ast.ENullShared,
 			},
 		},
-		"b.c": {
+		{
+			KeyParts: []string{"b", "c"},
 			DefineExpr: &config.DefineExpr{
 				Constant: js_ast.ENullShared,
 			},
 		},
-		"d": {
+		{
+			KeyParts: []string{"d"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"ident"},
 			},
 		},
-		"e.f": {
+		{
+			KeyParts: []string{"e", "f"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"ident"},
 			},
 		},
-		"g": {
+		{
+			KeyParts: []string{"g"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"dot", "chain"},
 			},
 		},
-		"h.i": {
+		{
+			KeyParts: []string{"h", "i"},
 			DefineExpr: &config.DefineExpr{
 				Parts: []string{"dot", "chain"},
 			},
@@ -5408,6 +5556,89 @@ NOTE: The expression "b.c" has been configured to be replaced with a constant us
 write.js: WARNING: Suspicious assignment to defined constant "b['c']"
 NOTE: The expression "b['c']" has been configured to be replaced with a constant using the "define" feature. If this expression is supposed to be a compile-time constant, then it doesn't make sense to assign to it here. Or if this expression is supposed to change at run-time, this "define" substitution should be removed.
 `,
+	})
+}
+
+func TestKeepNamesAllForms(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/keep.js": `
+				// Initializers
+				function fn() {}
+				function foo(fn = function() {}) {}
+				var fn = function() {};
+				var obj = { "f n": function() {} };
+				class Foo0 { "f n" = function() {} }
+				class Foo1 { static "f n" = function() {} }
+				class Foo2 { accessor "f n" = function() {} }
+				class Foo3 { static accessor "f n" = function() {} }
+				class Foo4 { #fn = function() {} }
+				class Foo5 { static #fn = function() {} }
+				class Foo6 { accessor #fn = function() {} }
+				class Foo7 { static accessor #fn = function() {} }
+
+				// Assignments
+				fn = function() {};
+				fn ||= function() {};
+				fn &&= function() {};
+				fn ??= function() {};
+
+				// Destructuring
+				var [fn = function() {}] = [];
+				var { fn = function() {} } = {};
+				for (var [fn = function() {}] = []; ; ) ;
+				for (var { fn = function() {} } = {}; ; ) ;
+				for (var [fn = function() {}] in obj) ;
+				for (var { fn = function() {} } in obj) ;
+				for (var [fn = function() {}] of obj) ;
+				for (var { fn = function() {} } of obj) ;
+				function foo([fn = function() {}]) {}
+				function foo({ fn = function() {} }) {}
+				[fn = function() {}] = [];
+				({ fn = function() {} } = {});
+			`,
+			"/do-not-keep.js": `
+				// Class methods
+				class Foo0 { fn() {} }
+				class Foo1 { *fn() {} }
+				class Foo2 { get fn() {} }
+				class Foo3 { set fn(_) {} }
+				class Foo4 { async fn() {} }
+				class Foo5 { static fn() {} }
+				class Foo6 { static *fn() {} }
+				class Foo7 { static get fn() {} }
+				class Foo8 { static set fn(_) {} }
+				class Foo9 { static async fn() {} }
+
+				// Class private methods
+				class Bar0 { #fn() {} }
+				class Bar1 { *#fn() {} }
+				class Bar2 { get #fn() {} }
+				class Bar3 { set #fn(_) {} }
+				class Bar4 { async #fn() {} }
+				class Bar5 { static #fn() {} }
+				class Bar6 { static *#fn() {} }
+				class Bar7 { static get #fn() {} }
+				class Bar8 { static set #fn(_) {} }
+				class Bar9 { static async #fn(_) {} }
+
+				// Object methods
+				const Baz0 = { fn() {} }
+				const Baz1 = { *fn() {} }
+				const Baz2 = { get fn() {} }
+				const Baz3 = { set fn(_) {} }
+				const Baz4 = { async fn() {} }
+			`,
+		},
+		entryPaths: []string{
+			"/keep.js",
+			"/do-not-keep.js",
+		},
+		options: config.Options{
+			Mode:         config.ModePassThrough,
+			AbsOutputDir: "/out",
+			KeepNames:    true,
+		},
 	})
 }
 
@@ -6452,15 +6683,15 @@ func TestEntryNamesNoSlashAfterDir(t *testing.T) {
 func TestEntryNamesNonPortableCharacter(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
-			"/entry1-*.ts": `console.log(1)`,
-			"/entry2-*.ts": `console.log(2)`,
+			"/entry1-:.ts": `console.log(1)`,
+			"/entry2-:.ts": `console.log(2)`,
 		},
 		entryPathsAdvanced: []bundler.EntryPoint{
-			// The "*" should turn into "_" for cross-platform Windows portability
-			{InputPath: "/entry1-*.ts"},
+			// The ":" should turn into "_" for cross-platform Windows portability
+			{InputPath: "/entry1-:.ts"},
 
-			// The "*" should be preserved since the user _really_ wants it
-			{InputPath: "/entry2-*.ts", OutputPath: "entry2-*"},
+			// The ":" should be preserved since the user _really_ wants it
+			{InputPath: "/entry2-:.ts", OutputPath: "entry2-*"},
 		},
 		options: config.Options{
 			Mode:         config.ModePassThrough,
@@ -7771,39 +8002,39 @@ func TestErrorsForAssertTypeJSON(t *testing.T) {
 				".copy": config.LoaderCopy,
 			},
 		},
-		expectedScanLog: `js-entry.js: ERROR: Cannot use non-default import "unused" with a standard JSON module
-js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "unused" import (which is non-standard behavior).
-js-entry.js: ERROR: Cannot use non-default import "used" with a standard JSON module
-js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "used" import (which is non-standard behavior).
-js-entry.js: WARNING: Non-default import "prop" is undefined with a standard JSON module
-js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
-js-entry.js: ERROR: Cannot use non-default import "exported" with a standard JSON module
-js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "exported" import (which is non-standard behavior).
-js-entry.js: ERROR: Cannot use non-default import "def3" with a standard JSON module
-js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "def3" import (which is non-standard behavior).
+		expectedScanLog: `js-entry.js: ERROR: Cannot use non-default import "unused" with a JSON import assertion
+js-entry.js: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "unused" import.
+js-entry.js: ERROR: Cannot use non-default import "used" with a JSON import assertion
+js-entry.js: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "used" import.
+js-entry.js: WARNING: Non-default import "prop" is undefined with a JSON import assertion
+js-entry.js: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import.
+js-entry.js: ERROR: Cannot use non-default import "exported" with a JSON import assertion
+js-entry.js: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "exported" import.
+js-entry.js: ERROR: Cannot use non-default import "def3" with a JSON import assertion
+js-entry.js: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "def3" import.
 js-entry.js: ERROR: The file "foo.text" was loaded with the "text" loader
 js-entry.js: NOTE: This import assertion requires the loader to be "json" instead:
 NOTE: You need to either reconfigure esbuild to ensure that the loader for this file is "json" or you need to remove this import assertion.
 js-entry.js: ERROR: The file "foo.file" was loaded with the "file" loader
 js-entry.js: NOTE: This import assertion requires the loader to be "json" instead:
 NOTE: You need to either reconfigure esbuild to ensure that the loader for this file is "json" or you need to remove this import assertion.
-ts-entry.ts: ERROR: Cannot use non-default import "used" with a standard JSON module
-ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "used" import (which is non-standard behavior).
-ts-entry.ts: WARNING: Non-default import "prop" is undefined with a standard JSON module
-ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
-ts-entry.ts: ERROR: Cannot use non-default import "exported" with a standard JSON module
-ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "exported" import (which is non-standard behavior).
-ts-entry.ts: ERROR: Cannot use non-default import "def3" with a standard JSON module
-ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "def3" import (which is non-standard behavior).
+ts-entry.ts: ERROR: Cannot use non-default import "used" with a JSON import assertion
+ts-entry.ts: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "used" import.
+ts-entry.ts: WARNING: Non-default import "prop" is undefined with a JSON import assertion
+ts-entry.ts: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import.
+ts-entry.ts: ERROR: Cannot use non-default import "exported" with a JSON import assertion
+ts-entry.ts: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "exported" import.
+ts-entry.ts: ERROR: Cannot use non-default import "def3" with a JSON import assertion
+ts-entry.ts: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "def3" import.
 `,
 	})
 }
@@ -7845,12 +8076,12 @@ func TestOutputForAssertTypeJSON(t *testing.T) {
 				".copy": config.LoaderCopy,
 			},
 		},
-		expectedScanLog: `js-entry.js: WARNING: Non-default import "prop" is undefined with a standard JSON module
-js-entry.js: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
-ts-entry.ts: WARNING: Non-default import "prop" is undefined with a standard JSON module
-ts-entry.ts: NOTE: This is considered an import of a standard JSON module because of the import assertion here:
-NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import (which is non-standard behavior).
+		expectedScanLog: `js-entry.js: WARNING: Non-default import "prop" is undefined with a JSON import assertion
+js-entry.js: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import.
+ts-entry.ts: WARNING: Non-default import "prop" is undefined with a JSON import assertion
+ts-entry.ts: NOTE: The JSON import assertion is here:
+NOTE: You can either keep the import assertion and only use the "default" import, or you can remove the import assertion and use the "prop" import.
 `,
 	})
 }
@@ -8030,6 +8261,26 @@ func TestMetafileVeryLongExternalPaths(t *testing.T) {
 	})
 }
 
+func TestMetafileImportWithTypeJSON(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/project/entry.js": `
+				import a from './data.json'
+				import b from './data.json' assert { type: 'json' }
+				import c from './data.json' with { type: 'json' }
+				x = [a, b, c]
+			`,
+			"/project/data.json": `{"some": "data"}`,
+		},
+		entryPaths: []string{"/project/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputDir:  "/out",
+			NeedsMetafile: true,
+		},
+	})
+}
+
 func TestCommentPreservation(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
@@ -8185,9 +8436,8 @@ func TestCommentPreservation(t *testing.T) {
 		},
 		entryPaths: []string{"/entry.js"},
 		options: config.Options{
-			Mode:         config.ModeBundle,
+			Mode:         config.ModePassThrough,
 			AbsOutputDir: "/out",
-			OutputFormat: config.FormatCommonJS,
 			ExternalSettings: config.ExternalSettings{
 				PreResolve: config.ExternalMatchers{
 					Exact: map[string]bool{"foo": true},
@@ -8312,7 +8562,7 @@ func TestErrorMessageCrashStdinIssue2913(t *testing.T) {
 			AbsOutputDir: "/out",
 		},
 		expectedScanLog: `<stdin>: ERROR: Could not resolve "node_modules/fflate"
-NOTE: You can mark the path "node_modules/fflate" as external to exclude it from the bundle, which will remove this error.
+NOTE: You can mark the path "node_modules/fflate" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle.
 `,
 	})
 }
@@ -8321,6 +8571,9 @@ func TestLineLimitNotMinified(t *testing.T) {
 	default_suite.expectBundled(t, bundled{
 		files: map[string]string{
 			"/script.jsx": `
+				import fileURL from './x.file'
+				import copyURL from './x.copy'
+				import dataURL from './x.data'
 				export const SignUpForm = (props) => {
 					return <p class="signup">
 						<label>Username: <input class="username" type="text"/></label>
@@ -8329,6 +8582,9 @@ func TestLineLimitNotMinified(t *testing.T) {
 							{props.buttonText}
 						</div>
 						<small>By signing up, you are agreeing to our <a href="/tos/">terms of service</a>.</small>
+						<img src={fileURL} />
+						<img src={copyURL} />
+						<img src={dataURL} />
 					</p>
 				}
 			`,
@@ -8343,16 +8599,30 @@ func TestLineLimitNotMinified(t *testing.T) {
 				`CIgZmlsbD0iI0ZGQ0YwMCIvPgogIDxwYXRoIGQ9Ik00Ny41IDUyLjVMOTUgMTAwbC00Ny41IDQ3LjVtNjAtOTVMM` +
 				`TU1IDEwMGwtNDcuNSA0Ny41IiBmaWxsPSJub25lIiBzdHJva2U9IiMxOTE5MTkiIHN0cm9rZS13aWR0aD0iMjQiL` +
 				`z4KPC9zdmc+Cg==);
+					cursor: url(x.file);
+					cursor: url(x.copy);
+					cursor: url(x.data);
 				}
 			`,
+			"/x.file": `...file...`,
+			"/x.copy": `...copy...`,
+			"/x.data": `...lots of long data...lots of long data...`,
 		},
 		entryPaths: []string{
 			"/script.jsx",
 			"/style.css",
 		},
 		options: config.Options{
+			Mode:         config.ModeBundle,
 			AbsOutputDir: "/out",
 			LineLimit:    32,
+			ExtensionToLoader: map[string]config.Loader{
+				".jsx":  config.LoaderJSX,
+				".css":  config.LoaderCSS,
+				".file": config.LoaderFile,
+				".copy": config.LoaderCopy,
+				".data": config.LoaderDataURL,
+			},
 		},
 	})
 }
@@ -8422,9 +8692,557 @@ func TestBadImportErrorMessageWithHandlesImportErrorsFlag(t *testing.T) {
 			AbsOutputFile: "/out.js",
 		},
 		expectedScanLog: `entry.js: ERROR: Could not resolve "foo"
-NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error. You can also add ".catch()" here to handle this failure at run-time instead of bundle-time.
+NOTE: You can mark the path "foo" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle. You can also add ".catch()" here to handle this failure at run-time instead of bundle-time.
 entry.js: ERROR: Could not resolve "bar"
-NOTE: You can mark the path "bar" as external to exclude it from the bundle, which will remove this error. You can also add ".catch()" here to handle this failure at run-time instead of bundle-time.
+NOTE: You can mark the path "bar" as external to exclude it from the bundle, which will remove this error and leave the unresolved path in the bundle. You can also add ".catch()" here to handle this failure at run-time instead of bundle-time.
 `,
+	})
+}
+
+func TestDecoratorPrintingESM(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { constant } from './constants'
+				import { imported } from 'somewhere'
+				import { undef } from './empty'
+
+				_ = class Outer {
+					#bar;
+
+					classes = [
+						class { @imported @imported() imported },
+						class { @unbound @unbound() unbound },
+						class { @constant @constant() constant },
+						class { @undef @undef() undef },
+
+						class { @(element[access]) indexed },
+						class { @foo.#bar private },
+						class { @foo.\u30FF unicode },
+						class { @(() => {}) arrow },
+					]
+				}
+			`,
+			"/constants.js": `
+				export const constant = 123
+			`,
+			"/empty.js": ``,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			OutputFormat:     config.FormatESModule,
+			AbsOutputFile:    "/out.js",
+			ExternalPackages: true,
+			MinifySyntax:     true,
+		},
+		expectedCompileLog: `entry.js: WARNING: Import "undef" will always be undefined because the file "empty.js" has no exports
+`,
+	})
+}
+
+func TestDecoratorPrintingCJS(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { constant } from './constants'
+				import { imported } from 'somewhere'
+				import { undef } from './empty'
+
+				_ = class Outer {
+					#bar;
+
+					classes = [
+						class { @imported @imported() imported },
+						class { @unbound @unbound() unbound },
+						class { @constant @constant() constant },
+						class { @undef @undef() undef },
+
+						class { @(element[access]) indexed },
+						class { @foo.#bar private },
+						class { @foo.\u30FF unicode },
+						class { @(() => {}) arrow },
+					]
+				}
+			`,
+			"/constants.js": `
+				export const constant = 123
+			`,
+			"/empty.js": ``,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:             config.ModeBundle,
+			OutputFormat:     config.FormatCommonJS,
+			AbsOutputFile:    "/out.js",
+			ExternalPackages: true,
+			MinifySyntax:     true,
+		},
+		expectedCompileLog: `entry.js: WARNING: Import "undef" will always be undefined because the file "empty.js" has no exports
+`,
+	})
+}
+
+// React's development-mode transform has a special "__self" value that's sort
+// of supposed to be set to "this". Except there's no specification for it
+// AFAIK and the value of "this" isn't always allowed to be accessed. For
+// example, accessing it before "super()" in a constructor call will crash.
+//
+// From what I understand the React team wanted to have it in case they need it
+// for some run-time warnings, but having it be accurate in all cases doesn't
+// really matter. For example, I'm not sure if it needs to even be any value in
+// particular for top-level JSX elements (top-level "this" can technically be
+// the module's exports object, which could materialize a lot of code to
+// generate one when bundling, so Facebook probably doesn't want that to
+// happen?).
+//
+// Anyway, this test case documents what esbuild does in case a specification
+// is produced in the future and it turns out esbuild should be doing something
+// else.
+func TestJSXDevSelfEdgeCases(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/function-this.jsx":             `export function Foo() { return <div/> }`,
+			"/class-this.jsx":                `export class Foo { foo() { return <div/> } }`,
+			"/normal-constructor.jsx":        `export class Foo { constructor() { this.foo = <div/> } }`,
+			"/derived-constructor.jsx":       `export class Foo extends Object { constructor() { super(<div/>); this.foo = <div/> } }`,
+			"/normal-constructor-arg.jsx":    `export class Foo { constructor(foo = <div/>) {} }`,
+			"/derived-constructor-arg.jsx":   `export class Foo extends Object { constructor(foo = <div/>) { super() } }`,
+			"/normal-constructor-field.tsx":  `export class Foo { foo = <div/> }`,
+			"/derived-constructor-field.tsx": `export class Foo extends Object { foo = <div/> }`,
+			"/static-field.jsx":              `export class Foo { static foo = <div/> }`,
+			"/top-level-this-esm.jsx":        `export let foo = <div/>; if (Foo) { foo = <Foo>nested top-level this</Foo> }`,
+			"/top-level-this-cjs.jsx":        `exports.foo = <div/>`,
+			"/typescript-namespace.tsx":      `export namespace Foo { export let foo = <div/> }`,
+			"/typescript-enum.tsx":           `export enum Foo { foo = <div/> }`,
+			"/tsconfig.json":                 `{ "compilerOptions": { "useDefineForClassFields": false } }`,
+		},
+		entryPaths: []string{"*"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/out",
+			JSX: config.JSXOptions{
+				AutomaticRuntime: true,
+				Development:      true,
+			},
+			UnsupportedJSFeatures: compat.ClassStaticField,
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{
+					Exact: map[string]bool{
+						"react/jsx-dev-runtime": true,
+					},
+				},
+			},
+		},
+	})
+}
+
+func TestObjectLiteralProtoSetterEdgeCases(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/local-shorthand.js": `
+				function foo(__proto__, bar) {
+					{
+						let __proto__, bar // These locals will be renamed
+						console.log(
+							'this must not become "{ __proto__: ... }":',
+							{
+								__proto__,
+								bar,
+							},
+						)
+					}
+				}
+			`,
+			"/local-normal.js": `
+				function foo(__proto__, bar) {
+					console.log(
+						'this must not become "{ __proto__ }":',
+						{
+							__proto__: __proto__,
+							bar: bar,
+						},
+					)
+				}
+			`,
+			"/import-shorthand.js": `
+				import { __proto__, bar } from 'foo'
+				function foo() {
+					console.log(
+						'this must not become "{ __proto__: ... }":',
+						{
+							__proto__,
+							bar,
+						},
+					)
+				}
+			`,
+			"/import-normal.js": `
+				import { __proto__, bar } from 'foo'
+				function foo() {
+					console.log(
+						'this must not become "{ __proto__ }":',
+						{
+							__proto__: __proto__,
+							bar: bar,
+						},
+					)
+				}
+			`,
+		},
+		entryPaths: []string{"*"},
+		options: config.Options{
+			AbsOutputDir: "/out",
+		},
+	})
+}
+
+func TestObjectLiteralProtoSetterEdgeCasesMinifySyntax(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/local-computed.js": `
+				function foo(__proto__, bar) {
+					{
+						let __proto__, bar // These locals will be renamed
+						console.log(
+							'this must not become "{ __proto__: ... }":',
+							{
+								['__proto__']: __proto__,
+								['bar']: bar,
+							},
+						)
+					}
+				}
+			`,
+			"/local-normal.js": `
+				function foo(__proto__, bar) {
+					console.log(
+						'this must not become "{ __proto__ }":',
+						{
+							__proto__: __proto__,
+							bar: bar,
+						},
+					)
+				}
+			`,
+			"/import-computed.js": `
+				import { __proto__, bar } from 'foo'
+				function foo() {
+					console.log(
+						'this must not become "{ __proto__: ... }":',
+						{
+							['__proto__']: __proto__,
+							['bar']: bar,
+						},
+					)
+				}
+			`,
+			"/import-normal.js": `
+				import { __proto__, bar } from 'foo'
+				function foo() {
+					console.log(
+						'this must not become "{ __proto__ }":',
+						{
+							__proto__: __proto__,
+							bar: bar,
+						},
+					)
+				}
+			`,
+		},
+		entryPaths: []string{"*"},
+		options: config.Options{
+			AbsOutputDir: "/out",
+			MinifySyntax: true,
+		},
+	})
+}
+
+func TestForbidStringImportNamesNoBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { "an import" as anImport } from "./foo"
+				export { "another import" as "an export" } from "./foo"
+				anImport()
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModePassThrough,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+		},
+		expectedCompileLog: `entry.js: ERROR: Using the string "an import" as an import name is not supported in the configured target environment
+entry.js: ERROR: Using the string "another import" as an import name is not supported in the configured target environment
+entry.js: ERROR: Using the string "an export" as an export name is not supported in the configured target environment
+`,
+	})
+}
+
+func TestForbidStringExportNamesNoBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				let ok = true
+				export { ok as "ok", ok as "not ok" }
+				export { "same name" } from "./foo"
+				export { "name 1" as "name 2" } from "./foo"
+				export * as "name space" from "./foo"
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModePassThrough,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+		},
+		expectedCompileLog: `entry.js: ERROR: Using the string "not ok" as an export name is not supported in the configured target environment
+entry.js: ERROR: Using the string "same name" as an export name is not supported in the configured target environment
+entry.js: ERROR: Using the string "name 1" as an import name is not supported in the configured target environment
+entry.js: ERROR: Using the string "name 2" as an export name is not supported in the configured target environment
+entry.js: ERROR: Using the string "name space" as an export name is not supported in the configured target environment
+`,
+	})
+}
+
+func TestForbidStringImportNamesBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { "nest ed" as nested } from "./nested.js"
+				export { nested }
+			`,
+			"/nested.js": `
+				import { "some import" as nested } from "external"
+				export { nested as "nest ed" }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+			ExternalSettings: config.ExternalSettings{
+				PreResolve: config.ExternalMatchers{Exact: map[string]bool{
+					"external": true,
+				}},
+			},
+		},
+		expectedCompileLog: `nested.js: ERROR: Using the string "some import" as an import name is not supported in the configured target environment
+`,
+	})
+}
+
+func TestForbidStringExportNamesBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { "o.k." as ok } from "./internal.js"
+				export { ok as "ok", ok as "not ok" }
+				export * from "./nested.js"
+				export * as "name space" from "./nested.js"
+			`,
+			"/internal.js": `
+				let ok = true
+				export { ok as "o.k." }
+			`,
+			"/nested.js": `
+				export * from "./very-nested.js"
+				let nested = 1
+				export { nested as "nested name" }
+			`,
+			"/very-nested.js": `
+				let nested = 2
+				export { nested as "very nested name" }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			AbsOutputFile:         "/out.js",
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+		},
+		expectedCompileLog: `entry.js: ERROR: Using the string "not ok" as an export name is not supported in the configured target environment
+entry.js: ERROR: Using the string "name space" as an export name is not supported in the configured target environment
+nested.js: ERROR: Using the string "nested name" as an export name is not supported in the configured target environment
+very-nested.js: ERROR: Using the string "very nested name" as an export name is not supported in the configured target environment
+`,
+	})
+}
+
+func TestInjectWithStringExportNameNoBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				console.log(test)
+			`,
+			"/inject.js": `
+				const old = console.log
+				const fn = (...args) => old.apply(console, ['log:'].concat(args))
+				export { fn as "console.log" }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModePassThrough,
+			AbsOutputFile:         "/out.js",
+			InjectPaths:           []string{"/inject.js"},
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+		},
+	})
+}
+
+func TestInjectWithStringExportNameBundle(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				console.log(test)
+				console.info(test)
+				console.warn(test)
+			`,
+			"/inject.js": `
+				const old = console.log
+				const fn = (...args) => old.apply(console, ['log:'].concat(args))
+				export { fn as "console.log" }
+				export { "console.log" as "console.info" } from "./inject.js"
+				import { "console.info" as info } from "./inject.js"
+				export { info as "console.warn" }
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeBundle,
+			AbsOutputFile:         "/out.js",
+			InjectPaths:           []string{"/inject.js"},
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+		},
+	})
+}
+
+func TestStringExportNamesCommonJS(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { "some import" as someImport } from "./foo"
+				export { someImport as "some export" }
+				export * as "all the stuff" from "./foo"
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeConvertFormat,
+			AbsOutputFile:         "/out.js",
+			OutputFormat:          config.FormatCommonJS,
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+		},
+	})
+}
+
+func TestStringExportNamesIIFE(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import { "some import" as someImport } from "./foo"
+				export { someImport as "some export" }
+				export * as "all the stuff" from "./foo"
+			`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:                  config.ModeConvertFormat,
+			AbsOutputFile:         "/out.js",
+			OutputFormat:          config.FormatIIFE,
+			UnsupportedJSFeatures: compat.ArbitraryModuleNamespaceNames,
+			GlobalName:            []string{"global", "name"},
+		},
+	})
+}
+
+func TestSourceIdentifierNameIndexSingleEntry(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			// Generate identifier names for top-level and nested files
+			"/Users/user/project/index.js": `
+				require('.')
+				require('pkg')
+				require('./nested')
+			`,
+			"/Users/user/project/nested/index.js":           `exports.nested = true`,
+			"/Users/user/project/node_modules/pkg/index.js": `exports.pkg = true`,
+		},
+		entryPaths: []string{"/Users/user/project/index.js"},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/Users/user/project/out",
+		},
+	})
+}
+
+func TestSourceIdentifierNameIndexMultipleEntry(t *testing.T) {
+	default_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			// Generate identifier names for top-level and nested files
+			"/Users/user/project/home/index.js": `
+				require('.')
+				require('pkg')
+				require('../common')
+			`,
+			"/Users/user/project/about/index.js": `
+				require('.')
+				require('pkg')
+				require('../common')
+			`,
+			"/Users/user/project/common/index.js":           `exports.common = true`,
+			"/Users/user/project/node_modules/pkg/index.js": `exports.pkg = true`,
+		},
+		entryPaths: []string{
+			"/Users/user/project/home/index.js",
+			"/Users/user/project/about/index.js",
+		},
+		options: config.Options{
+			Mode:         config.ModeBundle,
+			AbsOutputDir: "/Users/user/project/out",
+		},
+	})
+}
+
+func TestResolveExtensionsOrderIssue4053(t *testing.T) {
+	css_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.js": `
+				import test from "./Test"
+				import image from "expo-image"
+				console.log(test === 'Test.web.tsx')
+				console.log(image === 'Image.web.tsx')
+			`,
+			"/Test.web.tsx": `export default 'Test.web.tsx'`,
+			"/Test.tsx":     `export default 'Test.tsx'`,
+			"/node_modules/expo-image/index.js": `
+				export { default } from "./Image"
+			`,
+			"/node_modules/expo-image/Image.web.tsx": `export default 'Image.web.tsx'`,
+			"/node_modules/expo-image/Image.tsx":     `export default 'Image.tsx'`,
+		},
+		entryPaths: []string{"/entry.js"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
+			ExtensionOrder: []string{
+				".web.mjs",
+				".mjs",
+				".web.js",
+				".js",
+				".web.mts",
+				".mts",
+				".web.ts",
+				".ts",
+				".web.jsx",
+				".jsx",
+				".web.tsx",
+				".tsx",
+				".json",
+			},
+		},
 	})
 }

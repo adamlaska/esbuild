@@ -990,14 +990,12 @@ func TestTSExperimentalDecoratorsNoConfig(t *testing.T) {
 					@x @y mUndef: any
 					@x @y mDef = 1
 					@x @y method() { return new Foo }
-					@x @y declare mDecl: any
 					@x @y accessor aUndef: any
 					@x @y accessor aDef = 1
 
 					@x @y static sUndef: any
 					@x @y static sDef = new Foo
 					@x @y static sMethod() { return new Foo }
-					@x @y static declare sDecl: any
 					@x @y static accessor asUndef: any
 					@x @y static accessor asDef = 1
 
@@ -1056,6 +1054,7 @@ func TestTSExperimentalDecorators(t *testing.T) {
 					@x @y mDef = 1
 					@x @y method(@x0 @y0 arg0, @x1 @y1 arg1) { return new Foo }
 					@x @y declare mDecl
+					@x @y abstract mAbst
 					constructor(@x0 @y0 arg0, @x1 @y1 arg1) {}
 
 					@x @y static sUndef
@@ -1072,6 +1071,7 @@ func TestTSExperimentalDecorators(t *testing.T) {
 					@x @y [mDef()] = 1
 					@x @y [method()](@x0 @y0 arg0, @x1 @y1 arg1) { return new Foo }
 					@x @y declare [mDecl()]
+					@x @y abstract [mAbst()]
 
 					// Side effect order must be preserved even for fields without decorators
 					[xUndef()]
@@ -2887,6 +2887,98 @@ func TestTSExperimentalDecoratorsManglePropsStaticMethods(t *testing.T) {
 			Mode:          config.ModeBundle,
 			AbsOutputFile: "/out.js",
 			MangleProps:   regexp.MustCompile("_$"),
+		},
+	})
+}
+
+func TestTSPrintNonFiniteNumberInsideWith(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				// Use const enums to force inline values
+				const enum Foo {
+					NAN = 0 / 0,
+					POS_INF = 1 / 0,
+					NEG_INF = -1 / 0,
+				}
+
+				//! It's ok to use "NaN" and "Infinity" here
+				console.log(
+					Foo.NAN,
+					Foo.POS_INF,
+					Foo.NEG_INF,
+				)
+				checkPrecedence(
+					1 / Foo.NAN,
+					1 / Foo.POS_INF,
+					1 / Foo.NEG_INF,
+				)
+
+				//! We must not use "NaN" or "Infinity" inside "with"
+				with (x) {
+					console.log(
+						Foo.NAN,
+						Foo.POS_INF,
+						Foo.NEG_INF,
+					)
+					checkPrecedence(
+						1 / Foo.NAN,
+						1 / Foo.POS_INF,
+						1 / Foo.NEG_INF,
+					)
+				}
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModePassThrough,
+			AbsOutputFile: "/out.js",
+		},
+	})
+}
+
+func TestTSImportInNodeModulesNameCollisionWithCSS(t *testing.T) {
+	ts_suite.expectBundled(t, bundled{
+		files: map[string]string{
+			"/entry.ts": `
+				import "pkg"
+			`,
+			"/node_modules/pkg/index.ts": `
+				import js_ts_css from "./js_ts_css"
+				import ts_css from "./ts_css"
+				import js_ts from "./js_ts"
+				js_ts_css()
+				ts_css()
+				js_ts()
+			`,
+			"/node_modules/pkg/js_ts_css.js": `
+				import './js_ts_css.css'
+				export default function() {}
+			`,
+			"/node_modules/pkg/js_ts_css.ts": `
+				TEST FAILED
+			`,
+			"/node_modules/pkg/js_ts_css.css": `
+				.js_ts_css {}
+			`,
+			"/node_modules/pkg/ts_css.ts": `
+				import './ts_css.css'
+				export default function() {}
+			`,
+			"/node_modules/pkg/ts_css.css": `
+				.ts_css {}
+			`,
+			"/node_modules/pkg/js_ts.js": `
+				export default function() {}
+			`,
+			"/node_modules/pkg/js_ts.ts": `
+				TEST FAILED
+			`,
+		},
+		entryPaths: []string{"/entry.ts"},
+		options: config.Options{
+			Mode:          config.ModeBundle,
+			AbsOutputFile: "/out.js",
 		},
 	})
 }

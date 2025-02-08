@@ -1,12 +1,15 @@
 {
   "name": "@esbuild/android-arm",
-  "version": "0.18.17",
+  "version": "0.25.0",
   "description": "A WebAssembly shim for esbuild on Android ARM.",
-  "repository": "https://github.com/evanw/esbuild",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/evanw/esbuild.git"
+  },
   "license": "MIT",
   "preferUnplugged": true,
   "engines": {
-    "node": ">=12"
+    "node": ">=18"
   },
   "os": [
     "android"

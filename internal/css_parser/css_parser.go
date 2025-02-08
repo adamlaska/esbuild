@@ -24,19 +24,25 @@ type parser struct {
 	stack             []css_lexer.T
 	importRecords     []ast.ImportRecord
 	symbols           []ast.Symbol
-	defineLocs        map[ast.Ref]logger.Loc
-	localSymbolMap    map[string]ast.Ref
-	globalSymbolMap   map[string]ast.Ref
+	composes          map[ast.Ref]*css_ast.Composes
+	localSymbols      []ast.LocRef
+	localScope        map[string]ast.LocRef
+	globalScope       map[string]ast.LocRef
 	nestingWarnings   map[logger.Loc]struct{}
 	tracker           logger.LineColumnTracker
+	enclosingAtMedia  [][]css_ast.Token
+	layersPreImport   [][]string
+	layersPostImport  [][]string
+	enclosingLayer    []string
+	anonLayerCount    int
 	index             int
-	end               int
 	legalCommentIndex int
 	inSelectorSubtree int
 	prevError         logger.Loc
 	options           Options
 	nestingIsPresent  bool
 	makeLocalSymbols  bool
+	hasSeenAtImport   bool
 }
 
 type Options struct {
@@ -126,12 +132,11 @@ func Parse(log logger.Log, source logger.Source, options Options) css_ast.AST {
 		allComments:      result.AllComments,
 		legalComments:    result.LegalComments,
 		prevError:        logger.Loc{Start: -1},
-		defineLocs:       make(map[ast.Ref]logger.Loc),
-		localSymbolMap:   make(map[string]ast.Ref),
-		globalSymbolMap:  make(map[string]ast.Ref),
+		composes:         make(map[ast.Ref]*css_ast.Composes),
+		localScope:       make(map[string]ast.LocRef),
+		globalScope:      make(map[string]ast.LocRef),
 		makeLocalSymbols: options.symbolMode == symbolModeLocal,
 	}
-	p.end = len(p.tokens)
 	rules := p.parseListOfRules(ruleContext{
 		isTopLevel:     true,
 		parseSelectors: true,
@@ -144,7 +149,12 @@ func Parse(log logger.Log, source logger.Source, options Options) css_ast.AST {
 		ImportRecords:        p.importRecords,
 		ApproximateLineCount: result.ApproximateLineCount,
 		SourceMapComment:     result.SourceMapComment,
-		DefineLocs:           p.defineLocs,
+		LocalSymbols:         p.localSymbols,
+		LocalScope:           p.localScope,
+		GlobalScope:          p.globalScope,
+		Composes:             p.composes,
+		LayersPreImport:      p.layersPreImport,
+		LayersPostImport:     p.layersPostImport,
 	}
 }
 
@@ -184,20 +194,14 @@ func (p *parser) computeCharacterFrequency() *ast.CharFreq {
 }
 
 func (p *parser) advance() {
-	if p.index < p.end {
+	if p.index < len(p.tokens) {
 		p.index++
 	}
 }
 
 func (p *parser) at(index int) css_lexer.Token {
-	if index < p.end {
+	if index < len(p.tokens) {
 		return p.tokens[index]
-	}
-	if p.end < len(p.tokens) {
-		return css_lexer.Token{
-			Kind:  css_lexer.TEndOfFile,
-			Range: logger.Range{Loc: p.tokens[p.end].Range.Loc},
-		}
 	}
 	return css_lexer.Token{
 		Kind:  css_lexer.TEndOfFile,
@@ -306,33 +310,52 @@ func (p *parser) unexpected() {
 
 func (p *parser) symbolForName(loc logger.Loc, name string) ast.LocRef {
 	var kind ast.SymbolKind
-	var scope map[string]ast.Ref
+	var scope map[string]ast.LocRef
 
 	if p.makeLocalSymbols {
 		kind = ast.SymbolLocalCSS
-		scope = p.globalSymbolMap
+		scope = p.localScope
 	} else {
 		kind = ast.SymbolGlobalCSS
-		scope = p.localSymbolMap
+		scope = p.globalScope
 	}
 
-	ref, ok := scope[name]
+	entry, ok := scope[name]
 	if !ok {
-		ref = ast.Ref{
-			SourceIndex: p.source.Index,
-			InnerIndex:  uint32(len(p.symbols)),
+		entry = ast.LocRef{
+			Loc: loc,
+			Ref: ast.Ref{
+				SourceIndex: p.source.Index,
+				InnerIndex:  uint32(len(p.symbols)),
+			},
 		}
 		p.symbols = append(p.symbols, ast.Symbol{
 			Kind:         kind,
 			OriginalName: name,
 			Link:         ast.InvalidRef,
 		})
-		scope[name] = ref
-		p.defineLocs[ref] = loc
+		scope[name] = entry
+		if kind == ast.SymbolLocalCSS {
+			p.localSymbols = append(p.localSymbols, entry)
+		}
 	}
 
-	p.symbols[ref.InnerIndex].UseCountEstimate++
-	return ast.LocRef{Loc: loc, Ref: ref}
+	p.symbols[entry.Ref.InnerIndex].UseCountEstimate++
+	return entry
+}
+
+func (p *parser) recordAtLayerRule(layers [][]string) {
+	if p.anonLayerCount > 0 {
+		return
+	}
+
+	for _, layer := range layers {
+		if len(p.enclosingLayer) > 0 {
+			clone := make([]string, 0, len(p.enclosingLayer)+len(layer))
+			layer = append(append(clone, p.enclosingLayer...), layer...)
+		}
+		p.layersPostImport = append(p.layersPostImport, layer)
+	}
 }
 
 type ruleContext struct {
@@ -444,6 +467,18 @@ loop:
 			atRuleContext.importValidity = atRuleInvalidAfter
 		}
 
+		// Note: CSS recently changed to parse and discard declarations
+		// here instead of treating them as the start of a qualified rule.
+		// See also: https://github.com/w3c/csswg-drafts/issues/8834
+		if !context.isTopLevel {
+			if scan, index := p.scanForEndOfRule(); scan == endOfRuleSemicolon {
+				tokens := p.convertTokens(p.tokens[p.index:index])
+				rules = append(rules, css_ast.Rule{Loc: p.current().Range.Loc, Data: &css_ast.RBadDeclaration{Tokens: tokens}})
+				p.index = index + 1
+				continue
+			}
+		}
+
 		var rule css_ast.Rule
 		if context.parseSelectors {
 			rule = p.parseSelectorRule(context.isTopLevel, parseSelectorOpts{})
@@ -466,6 +501,7 @@ loop:
 }
 
 type listOfDeclarationsOpts struct {
+	composesContext      *composesContext
 	canInlineNoOpNesting bool
 }
 
@@ -479,7 +515,7 @@ func (p *parser) parseListOfDeclarations(opts listOfDeclarationsOpts) (list []cs
 			p.advance()
 
 		case css_lexer.TEndOfFile, css_lexer.TCloseBrace:
-			list = p.processDeclarations(list)
+			list = p.processDeclarations(list, opts.composesContext)
 			if p.options.minifySyntax {
 				list = p.mangleRules(list, false /* isTopLevel */)
 
@@ -518,50 +554,42 @@ func (p *parser) parseListOfDeclarations(opts listOfDeclarationsOpts) (list []cs
 			}))
 
 		// Reference: https://drafts.csswg.org/css-nesting-1/
-		case css_lexer.TDelimAmpersand,
-			css_lexer.TDelimDot,
-			css_lexer.THash,
-			css_lexer.TColon,
-			css_lexer.TOpenBracket,
-			css_lexer.TDelimAsterisk,
-			css_lexer.TDelimBar,
-			css_lexer.TDelimPlus,
-			css_lexer.TDelimGreaterThan,
-			css_lexer.TDelimTilde:
-			p.nestingIsPresent = true
-			foundNesting = true
-			rule := p.parseSelectorRule(false, parseSelectorOpts{isDeclarationContext: true})
+		default:
+			if scan, _ := p.scanForEndOfRule(); scan == endOfRuleOpenBrace {
+				p.nestingIsPresent = true
+				foundNesting = true
+				rule := p.parseSelectorRule(false, parseSelectorOpts{
+					isDeclarationContext: true,
+					composesContext:      opts.composesContext,
+				})
 
-			// If this rule was a single ":global" or ":local", inline it here. This
-			// is handled differently than a bare "&" with normal CSS nesting because
-			// that would be inlined at the end of the parent rule's body instead,
-			// which is probably unexpected (e.g. it would trip people up when trying
-			// to write rules in a specific order).
-			if sel, ok := rule.Data.(*css_ast.RSelector); ok && len(sel.Selectors) == 1 {
-				if first := sel.Selectors[0]; len(first.Selectors) == 1 {
-					if first := first.Selectors[0]; first.WasEmptyFromLocalOrGlobal && first.IsSingleAmpersand() {
-						list = append(list, sel.Rules...)
-						continue
+				// If this rule was a single ":global" or ":local", inline it here. This
+				// is handled differently than a bare "&" with normal CSS nesting because
+				// that would be inlined at the end of the parent rule's body instead,
+				// which is probably unexpected (e.g. it would trip people up when trying
+				// to write rules in a specific order).
+				if sel, ok := rule.Data.(*css_ast.RSelector); ok && len(sel.Selectors) == 1 {
+					if first := sel.Selectors[0]; len(first.Selectors) == 1 {
+						if first := first.Selectors[0]; first.WasEmptyFromLocalOrGlobal && first.IsSingleAmpersand() {
+							list = append(list, sel.Rules...)
+							continue
+						}
 					}
 				}
+
+				list = append(list, rule)
+			} else {
+				list = append(list, p.parseDeclaration())
 			}
-
-			list = append(list, rule)
-
-		default:
-			list = append(list, p.parseDeclaration())
 		}
 	}
 }
 
 func (p *parser) mangleRules(rules []css_ast.Rule, isTopLevel bool) []css_ast.Rule {
-	type hashEntry struct {
-		indices []uint32
-	}
-
 	// Remove empty rules
+	mangledRules := make([]css_ast.Rule, 0, len(rules))
 	var prevNonComment css_ast.R
-	n := 0
+next:
 	for _, rule := range rules {
 		nextNonComment := rule.Data
 
@@ -598,6 +626,42 @@ func (p *parser) mangleRules(rules []css_ast.Rule, isTopLevel bool) []css_ast.Ru
 				continue
 			}
 
+			// Unwrap "@media" rules that duplicate conditions from a parent "@media"
+			// rule. This is unlikely to be authored manually but can be automatically
+			// generated when using a CSS framework such as Tailwind.
+			//
+			//   @media (min-width: 1024px) {
+			//     .md\:class {
+			//       color: red;
+			//     }
+			//     @media (min-width: 1024px) {
+			//       .md\:class {
+			//         color: red;
+			//       }
+			//     }
+			//   }
+			//
+			// This converts that code into the following:
+			//
+			//   @media (min-width: 1024px) {
+			//     .md\:class {
+			//       color: red;
+			//     }
+			//     .md\:class {
+			//       color: red;
+			//     }
+			//   }
+			//
+			// Which can then be mangled further.
+			if strings.EqualFold(r.AtToken, "media") {
+				for _, prelude := range p.enclosingAtMedia {
+					if css_ast.TokensEqualIgnoringWhitespace(r.Prelude, prelude) {
+						mangledRules = append(mangledRules, r.Rules...)
+						continue next
+					}
+				}
+			}
+
 		case *css_ast.RSelector:
 			if len(r.Rules) == 0 {
 				continue
@@ -632,19 +696,17 @@ func (p *parser) mangleRules(rules []css_ast.Rule, isTopLevel bool) []css_ast.Ru
 			prevNonComment = nextNonComment
 		}
 
-		rules[n] = rule
-		n++
+		mangledRules = append(mangledRules, rule)
 	}
-	rules = rules[:n]
 
 	// Mangle non-top-level rules using a back-to-front pass. Top-level rules
 	// will be mangled by the linker instead for cross-file rule mangling.
 	if !isTopLevel {
 		remover := MakeDuplicateRuleMangler(ast.SymbolMap{})
-		rules = remover.RemoveDuplicateRulesInPlace(p.source.Index, rules, p.importRecords)
+		mangledRules = remover.RemoveDuplicateRulesInPlace(p.source.Index, mangledRules, p.importRecords)
 	}
 
-	return rules
+	return mangledRules
 }
 
 type ruleEntry struct {
@@ -662,7 +724,6 @@ type callEntry struct {
 }
 
 type DuplicateRuleRemover struct {
-	symbols ast.SymbolMap
 	entries map[uint32]hashEntry
 	calls   []callEntry
 	check   css_ast.CrossFileEqualityCheck
@@ -837,7 +898,7 @@ var nonDeprecatedElementsSupportedByIE7 = map[string]bool{
 func isSafeSelectors(complexSelectors []css_ast.ComplexSelector) bool {
 	for _, complex := range complexSelectors {
 		for _, compound := range complex.Selectors {
-			if compound.HasNestingSelector() {
+			if len(compound.NestingSelectorLocs) > 0 {
 				// Bail because this is an extension: https://drafts.csswg.org/css-nesting-1/
 				return false
 			}
@@ -906,13 +967,33 @@ func (p *parser) parseURLOrString() (string, logger.Range, bool) {
 		return text, t.Range, true
 
 	case css_lexer.TFunction:
-		if p.decoded() == "url" {
+		if strings.EqualFold(p.decoded(), "url") {
 			matchingLoc := logger.Loc{Start: p.current().Range.End() - 1}
-			p.advance()
-			t = p.current()
-			text := p.decoded()
-			if p.expect(css_lexer.TString) && p.expectWithMatchingLoc(css_lexer.TCloseParen, matchingLoc) {
-				return text, t.Range, true
+			i := p.index + 1
+
+			// Skip over whitespace
+			for p.at(i).Kind == css_lexer.TWhitespace {
+				i++
+			}
+
+			// Consume a string
+			if p.at(i).Kind == css_lexer.TString {
+				stringIndex := i
+				i++
+
+				// Skip over whitespace
+				for p.at(i).Kind == css_lexer.TWhitespace {
+					i++
+				}
+
+				// Consume a closing parenthesis
+				if close := p.at(i).Kind; close == css_lexer.TCloseParen || close == css_lexer.TEndOfFile {
+					t := p.at(stringIndex)
+					text := t.DecodedText(p.source.Contents)
+					p.index = i
+					p.expectWithMatchingLoc(css_lexer.TCloseParen, matchingLoc)
+					return text, t.Range, true
+				}
 			}
 		}
 	}
@@ -1021,6 +1102,10 @@ var specialAtRules = map[string]atRuleKind{
 	// Defining before-change style: the @starting-style rule
 	// Reference: https://drafts.csswg.org/css-transitions-2/#defining-before-change-style-the-starting-style-rule
 	"starting-style": atRuleInheritContext,
+
+	// Anchor Positioning
+	// Reference: https://drafts.csswg.org/css-anchor-position-1/#at-ruledef-position-try
+	"position-try": atRuleDeclarations,
 }
 
 var atKnownRuleCanBeRemovedIfEmpty = map[string]bool{
@@ -1078,13 +1163,14 @@ func (p *parser) parseAtRule(context atRuleContext) css_ast.Rule {
 	// Parse the name
 	atToken := p.decoded()
 	atRange := p.current().Range
-	kind := specialAtRules[atToken]
+	lowerAtToken := strings.ToLower(atToken)
+	kind := specialAtRules[lowerAtToken]
 	p.advance()
 
 	// Parse the prelude
 	preludeStart := p.index
 abortRuleParser:
-	switch atToken {
+	switch lowerAtToken {
 	case "charset":
 		switch context.charsetValidity {
 		case atRuleInvalid:
@@ -1127,6 +1213,7 @@ abortRuleParser:
 			kind = atRuleEmpty
 			p.eat(css_lexer.TWhitespace)
 			if path, r, ok := p.expectURLOrString(); ok {
+				var conditions css_ast.ImportConditions
 				importConditionsStart := p.index
 				for {
 					if kind := p.current().Kind; kind == css_lexer.TSemicolon || kind == css_lexer.TOpenBrace ||
@@ -1138,26 +1225,55 @@ abortRuleParser:
 				if p.current().Kind == css_lexer.TOpenBrace {
 					break // Avoid parsing an invalid "@import" rule
 				}
-				importConditions := p.convertTokens(p.tokens[importConditionsStart:p.index])
-				kind := ast.ImportAt
+				conditions.Media = p.convertTokens(p.tokens[importConditionsStart:p.index])
 
 				// Insert or remove whitespace before the first token
-				if len(importConditions) > 0 {
-					kind = ast.ImportAtConditional
-					if p.options.minifyWhitespace {
-						importConditions[0].Whitespace &= ^css_ast.WhitespaceBefore
-					} else {
-						importConditions[0].Whitespace |= css_ast.WhitespaceBefore
+				var importConditions *css_ast.ImportConditions
+				if len(conditions.Media) > 0 {
+					importConditions = &conditions
+
+					// Handle "layer()"
+					if t := conditions.Media[0]; (t.Kind == css_lexer.TIdent || t.Kind == css_lexer.TFunction) && strings.EqualFold(t.Text, "layer") {
+						conditions.Layers = conditions.Media[:1]
+						conditions.Media = conditions.Media[1:]
+					}
+
+					// Handle "supports()"
+					if len(conditions.Media) > 0 {
+						if t := conditions.Media[0]; t.Kind == css_lexer.TFunction && strings.EqualFold(t.Text, "supports") {
+							conditions.Supports = conditions.Media[:1]
+							conditions.Media = conditions.Media[1:]
+						}
+					}
+
+					// Remove leading and trailing whitespace
+					if len(conditions.Layers) > 0 {
+						conditions.Layers[0].Whitespace &= ^(css_ast.WhitespaceBefore | css_ast.WhitespaceAfter)
+					}
+					if len(conditions.Supports) > 0 {
+						conditions.Supports[0].Whitespace &= ^(css_ast.WhitespaceBefore | css_ast.WhitespaceAfter)
+					}
+					if n := len(conditions.Media); n > 0 {
+						conditions.Media[0].Whitespace &= ^css_ast.WhitespaceBefore
+						conditions.Media[n-1].Whitespace &= ^css_ast.WhitespaceAfter
 					}
 				}
 
 				p.expect(css_lexer.TSemicolon)
 				importRecordIndex := uint32(len(p.importRecords))
 				p.importRecords = append(p.importRecords, ast.ImportRecord{
-					Kind:  kind,
+					Kind:  ast.ImportAt,
 					Path:  logger.Path{Text: path},
 					Range: r,
 				})
+
+				// Fill in the pre-import layers once we see the first "@import"
+				if !p.hasSeenAtImport {
+					p.hasSeenAtImport = true
+					p.layersPreImport = p.layersPostImport
+					p.layersPostImport = nil
+				}
+
 				return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtImport{
 					ImportRecordIndex: importRecordIndex,
 					ImportConditions:  importConditions,
@@ -1172,6 +1288,17 @@ abortRuleParser:
 
 		if p.peek(css_lexer.TIdent) {
 			name = p.decoded()
+			if isInvalidAnimationName(name) {
+				msg := logger.Msg{
+					ID:    logger.MsgID_CSS_CSSSyntaxError,
+					Kind:  logger.Warning,
+					Data:  p.tracker.MsgData(p.current().Range, fmt.Sprintf("Cannot use %q as a name for \"@keyframes\" without quotes", name)),
+					Notes: []logger.MsgData{{Text: fmt.Sprintf("You can put %q in quotes to prevent it from becoming a CSS keyword.", name)}},
+				}
+				msg.Data.Location.Suggestion = fmt.Sprintf("%q", name)
+				p.log.AddMsg(msg)
+				break
+			}
 			p.advance()
 		} else if p.peek(css_lexer.TString) {
 			// Note: Strings as names is allowed in the CSS specification and works in
@@ -1180,6 +1307,9 @@ abortRuleParser:
 			// them silently breaking in Chrome.
 			name = p.decoded()
 			p.advance()
+			if !p.makeLocalSymbols && isInvalidAnimationName(name) {
+				break
+			}
 		} else if !p.expect(css_lexer.TIdent) {
 			break
 		}
@@ -1257,11 +1387,11 @@ abortRuleParser:
 							}
 							text := p.decoded()
 							if t.Kind == css_lexer.TIdent {
-								if text == "from" {
+								if strings.EqualFold(text, "from") {
 									if p.options.minifySyntax {
 										text = "0%" // "0%" is equivalent to but shorter than "from"
 									}
-								} else if text != "to" {
+								} else if !strings.EqualFold(text, "to") {
 									p.expect(css_lexer.TPercentage)
 								}
 							} else if p.options.minifySyntax && text == "100%" {
@@ -1338,6 +1468,13 @@ abortRuleParser:
 		// Read the optional block
 		matchingLoc := p.current().Range.Loc
 		if len(names) <= 1 && p.eat(css_lexer.TOpenBrace) {
+			p.recordAtLayerRule(names)
+			oldEnclosingLayer := p.enclosingLayer
+			if len(names) == 1 {
+				p.enclosingLayer = append(p.enclosingLayer, names[0]...)
+			} else {
+				p.anonLayerCount++
+			}
 			var rules []css_ast.Rule
 			if context.isDeclarationList {
 				rules = p.parseListOfDeclarations(listOfDeclarationsOpts{
@@ -1348,6 +1485,10 @@ abortRuleParser:
 					parseSelectors: true,
 				})
 			}
+			if len(names) != 1 {
+				p.anonLayerCount--
+			}
+			p.enclosingLayer = oldEnclosingLayer
 			closeBraceLoc := p.current().Range.Loc
 			if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
 				closeBraceLoc = logger.Loc{}
@@ -1357,6 +1498,7 @@ abortRuleParser:
 
 		// Handle lack of a block
 		if len(names) >= 1 && p.eat(css_lexer.TSemicolon) {
+			p.recordAtLayerRule(names)
 			return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtLayer{Names: names}}
 		}
 
@@ -1364,11 +1506,13 @@ abortRuleParser:
 		switch p.current().Kind {
 		case css_lexer.TEndOfFile:
 			p.expect(css_lexer.TSemicolon)
+			p.recordAtLayerRule(names)
 			return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtLayer{Names: names}}
 
 		case css_lexer.TCloseBrace:
 			p.expect(css_lexer.TSemicolon)
 			if !context.isTopLevel {
+				p.recordAtLayerRule(names)
 				return css_ast.Rule{Loc: atRange.Loc, Data: &css_ast.RAtLayer{Names: names}}
 			}
 
@@ -1380,7 +1524,7 @@ abortRuleParser:
 		}
 
 	default:
-		if kind == atRuleUnknown && atToken == "namespace" {
+		if kind == atRuleUnknown && lowerAtToken == "namespace" {
 			// CSS namespaces are a weird feature that appears to only really be
 			// useful for styling XML. And the world has moved on from XHTML to
 			// HTML5 so pretty much no one uses CSS namespaces anymore. They are
@@ -1454,7 +1598,7 @@ prelude:
 		}
 
 		// Handle local names for "@counter-style"
-		if len(prelude) == 1 && atToken == "counter-style" {
+		if len(prelude) == 1 && lowerAtToken == "counter-style" {
 			if t := &prelude[0]; t.Kind == css_lexer.TIdent {
 				t.Kind = css_lexer.TSymbol
 				t.PayloadIndex = p.symbolForName(t.Loc, t.Text).Ref.InnerIndex
@@ -1468,6 +1612,14 @@ prelude:
 		matchingLoc := p.current().Range.Loc
 		p.expect(css_lexer.TOpenBrace)
 		var rules []css_ast.Rule
+
+		// Push the "@media" conditions
+		isAtMedia := lowerAtToken == "media"
+		if isAtMedia {
+			p.enclosingAtMedia = append(p.enclosingAtMedia, prelude)
+		}
+
+		// Parse the block for this rule
 		if context.isDeclarationList {
 			rules = p.parseListOfDeclarations(listOfDeclarationsOpts{
 				canInlineNoOpNesting: context.canInlineNoOpNesting,
@@ -1477,13 +1629,19 @@ prelude:
 				parseSelectors: true,
 			})
 		}
+
+		// Pop the "@media" conditions
+		if isAtMedia {
+			p.enclosingAtMedia = p.enclosingAtMedia[:len(p.enclosingAtMedia)-1]
+		}
+
 		closeBraceLoc := p.current().Range.Loc
 		if !p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
 			closeBraceLoc = logger.Loc{}
 		}
 
 		// Handle local names for "@container"
-		if len(prelude) >= 1 && atToken == "container" {
+		if len(prelude) >= 1 && lowerAtToken == "container" {
 			if t := &prelude[0]; t.Kind == css_lexer.TIdent && strings.ToLower(t.Text) != "not" {
 				t.Kind = css_lexer.TSymbol
 				t.PayloadIndex = p.symbolForName(t.Loc, t.Text).Ref.InnerIndex
@@ -1669,23 +1827,23 @@ loop:
 			var nested []css_ast.Token
 			original := tokens
 			nestedOpts := opts
-			if token.Text == "var" {
+			if strings.EqualFold(token.Text, "var") {
 				// CSS variables require verbatim whitespace for correctness
 				nestedOpts.verbatimWhitespace = true
 			}
-			if token.Text == "calc" {
+			if strings.EqualFold(token.Text, "calc") {
 				nestedOpts.isInsideCalcFunction = true
 			}
 			nested, tokens = p.convertTokensHelper(tokens, css_lexer.TCloseParen, nestedOpts)
 			token.Children = &nested
 
 			// Apply "calc" simplification rules when minifying
-			if p.options.minifySyntax && token.Text == "calc" {
+			if p.options.minifySyntax && strings.EqualFold(token.Text, "calc") {
 				token = p.tryToReduceCalcExpression(token)
 			}
 
 			// Treat a URL function call with a string just like a URL token
-			if token.Text == "url" && len(nested) == 1 && nested[0].Kind == css_lexer.TString {
+			if strings.EqualFold(token.Text, "url") && len(nested) == 1 && nested[0].Kind == css_lexer.TString {
 				token.Kind = css_lexer.TURL
 				token.Text = ""
 				token.Children = nil
@@ -1905,9 +2063,55 @@ func (p *parser) parseSelectorRule(isTopLevel bool, opts parseSelectorOpts) css_
 		matchingLoc := p.current().Range.Loc
 		if p.expect(css_lexer.TOpenBrace) {
 			p.inSelectorSubtree++
-			selector.Rules = p.parseListOfDeclarations(listOfDeclarationsOpts{
+			declOpts := listOfDeclarationsOpts{
 				canInlineNoOpNesting: canInlineNoOpNesting,
-			})
+			}
+
+			// Prepare for "composes" declarations
+			if opts.composesContext != nil && len(list) == 1 && len(list[0].Selectors) == 1 && list[0].Selectors[0].IsSingleAmpersand() {
+				// Support code like this:
+				//
+				//   .foo {
+				//     :local { composes: bar }
+				//     :global { composes: baz }
+				//   }
+				//
+				declOpts.composesContext = opts.composesContext
+			} else {
+				composesContext := composesContext{parentRange: list[0].Selectors[0].Range()}
+				if opts.composesContext != nil {
+					composesContext.problemRange = opts.composesContext.parentRange
+				}
+				for _, sel := range list {
+					first := sel.Selectors[0]
+					if first.Combinator.Byte != 0 {
+						composesContext.problemRange = logger.Range{Loc: first.Combinator.Loc, Len: 1}
+					} else if first.TypeSelector != nil {
+						composesContext.problemRange = first.TypeSelector.Range()
+					} else if len(first.NestingSelectorLocs) > 0 {
+						composesContext.problemRange = logger.Range{Loc: first.NestingSelectorLocs[0], Len: 1}
+					} else {
+						for i, ss := range first.SubclassSelectors {
+							class, ok := ss.Data.(*css_ast.SSClass)
+							if i > 0 || !ok {
+								composesContext.problemRange = ss.Range
+							} else {
+								composesContext.parentRefs = append(composesContext.parentRefs, class.Name.Ref)
+							}
+						}
+					}
+					if composesContext.problemRange.Len > 0 {
+						break
+					}
+					if len(sel.Selectors) > 1 {
+						composesContext.problemRange = sel.Selectors[1].Range()
+						break
+					}
+				}
+				declOpts.composesContext = &composesContext
+			}
+
+			selector.Rules = p.parseListOfDeclarations(declOpts)
 			p.inSelectorSubtree--
 			closeBraceLoc := p.current().Range.Loc
 			if p.expectWithMatchingLoc(css_lexer.TCloseBrace, matchingLoc) {
@@ -1979,6 +2183,56 @@ loop:
 	return css_ast.Rule{Loc: preludeLoc, Data: &qualified}
 }
 
+type endOfRuleScan uint8
+
+const (
+	endOfRuleUnknown endOfRuleScan = iota
+	endOfRuleSemicolon
+	endOfRuleOpenBrace
+)
+
+// Note: This was a late change to the CSS nesting syntax.
+// See also: https://github.com/w3c/csswg-drafts/issues/7961
+func (p *parser) scanForEndOfRule() (endOfRuleScan, int) {
+	var initialStack [4]css_lexer.T
+	stack := initialStack[:0]
+
+	for i, t := range p.tokens[p.index:] {
+		switch t.Kind {
+		case css_lexer.TSemicolon:
+			if len(stack) == 0 {
+				return endOfRuleSemicolon, p.index + i
+			}
+
+		case css_lexer.TFunction, css_lexer.TOpenParen:
+			stack = append(stack, css_lexer.TCloseParen)
+
+		case css_lexer.TOpenBracket:
+			stack = append(stack, css_lexer.TCloseBracket)
+
+		case css_lexer.TOpenBrace:
+			if len(stack) == 0 {
+				return endOfRuleOpenBrace, p.index + i
+			}
+			stack = append(stack, css_lexer.TCloseBrace)
+
+		case css_lexer.TCloseParen, css_lexer.TCloseBracket:
+			if n := len(stack); n > 0 && t.Kind == stack[n-1] {
+				stack = stack[:n-1]
+			}
+
+		case css_lexer.TCloseBrace:
+			if n := len(stack); n > 0 && t.Kind == stack[n-1] {
+				stack = stack[:n-1]
+			} else {
+				return endOfRuleUnknown, -1
+			}
+		}
+	}
+
+	return endOfRuleUnknown, -1
+}
+
 func (p *parser) parseDeclaration() css_ast.Rule {
 	// Parse the key
 	keyStart := p.index
@@ -1992,16 +2246,11 @@ func (p *parser) parseDeclaration() css_ast.Rule {
 
 	// Parse the value
 	valueStart := p.index
-	foundOpenBrace := false
 stop:
 	for {
 		switch p.current().Kind {
 		case css_lexer.TEndOfFile, css_lexer.TSemicolon, css_lexer.TCloseBrace:
 			break stop
-
-		case css_lexer.TOpenBrace:
-			foundOpenBrace = true
-			p.parseComponentValue()
 
 		default:
 			p.parseComponentValue()
@@ -2011,32 +2260,14 @@ stop:
 	// Stop now if this is not a valid declaration
 	if !ok {
 		if keyIsIdent {
-			if foundOpenBrace {
-				// If we encountered a "{", assume this is someone trying to make a nested style rule
-				if keyRange.Loc.Start > p.prevError.Start {
-					p.prevError.Start = keyRange.Loc.Start
-					key := p.tokens[keyStart].DecodedText(p.source.Contents)
-					data := p.tracker.MsgData(keyRange, fmt.Sprintf("A nested style rule cannot start with %q because it looks like the start of a declaration", key))
-					data.Location.Suggestion = fmt.Sprintf(":is(%s)", p.source.TextForRange(keyRange))
-					p.log.AddMsgID(logger.MsgID_CSS_CSSSyntaxError, logger.Msg{
-						Kind: logger.Warning,
-						Data: data,
-						Notes: []logger.MsgData{{
-							Text: "To start a nested style rule with an identifier, you need to wrap the " +
-								"identifier in \":is(...)\" to prevent the rule from being parsed as a declaration."}},
-					})
-				}
-			} else {
-				// Otherwise, show a generic error about a missing ":"
-				if end := keyRange.End(); end > p.prevError.Start {
-					p.prevError.Start = end
-					data := p.tracker.MsgData(logger.Range{Loc: logger.Loc{Start: end}}, "Expected \":\"")
-					data.Location.Suggestion = ":"
-					p.log.AddMsgID(logger.MsgID_CSS_CSSSyntaxError, logger.Msg{
-						Kind: logger.Warning,
-						Data: data,
-					})
-				}
+			if end := keyRange.End(); end > p.prevError.Start {
+				p.prevError.Start = end
+				data := p.tracker.MsgData(logger.Range{Loc: logger.Loc{Start: end}}, "Expected \":\"")
+				data.Location.Suggestion = ":"
+				p.log.AddMsgID(logger.MsgID_CSS_CSSSyntaxError, logger.Msg{
+					Kind: logger.Warning,
+					Data: data,
+				})
 			}
 		}
 
@@ -2083,11 +2314,12 @@ stop:
 		}
 	}
 
-	key := css_ast.KnownDeclarations[keyText]
+	lowerKeyText := strings.ToLower(keyText)
+	key := css_ast.KnownDeclarations[lowerKeyText]
 
 	// Attempt to point out trivial typos
 	if key == css_ast.DUnknown {
-		if corrected, ok := css_ast.MaybeCorrectDeclarationTypo(keyText); ok {
+		if corrected, ok := css_ast.MaybeCorrectDeclarationTypo(lowerKeyText); ok {
 			data := p.tracker.MsgData(keyToken.Range, fmt.Sprintf("%q is not a known CSS property", keyText))
 			data.Location.Suggestion = corrected
 			p.log.AddMsgID(logger.MsgID_CSS_UnsupportedCSSProperty, logger.Msg{Kind: logger.Warning, Data: data,

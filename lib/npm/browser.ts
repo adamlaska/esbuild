@@ -2,9 +2,13 @@ import type * as types from "../shared/types"
 import * as common from "../shared/common"
 import * as ourselves from "./browser"
 
+interface Go {
+  _scheduledTimeouts: Map<number, ReturnType<typeof setTimeout>>
+}
+
 declare const ESBUILD_VERSION: string
 declare let WEB_WORKER_SOURCE_CODE: string
-declare let WEB_WORKER_FUNCTION: (postMessage: (data: Uint8Array) => void) => (event: { data: Uint8Array | ArrayBuffer | WebAssembly.Module }) => void
+declare let WEB_WORKER_FUNCTION: (postMessage: (data: Uint8Array) => void) => (event: { data: Uint8Array | ArrayBuffer | WebAssembly.Module }) => Go
 
 export let version = ESBUILD_VERSION
 
@@ -39,6 +43,11 @@ export const analyzeMetafileSync: typeof types.analyzeMetafileSync = () => {
   throw new Error(`The "analyzeMetafileSync" API only works in node`)
 }
 
+export const stop = () => {
+  if (stopService) stopService()
+  return Promise.resolve()
+}
+
 interface Service {
   build: typeof types.build
   context: typeof types.context
@@ -48,6 +57,7 @@ interface Service {
 }
 
 let initializePromise: Promise<void> | undefined
+let stopService: (() => void) | undefined
 let longLivedService: Service | undefined
 
 let ensureServiceIsRunning = (): Service => {
@@ -78,6 +88,9 @@ const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembl
     terminate: () => void
   }
 
+  let rejectAllWith: (error: unknown) => void
+  const rejectAllPromise = new Promise(resolve => rejectAllWith = resolve)
+
   if (useWorker) {
     // Run esbuild off the main thread
     let blob = new Blob([`onmessage=${WEB_WORKER_SOURCE_CODE}(postMessage)`], { type: 'text/javascript' })
@@ -85,10 +98,20 @@ const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembl
   } else {
     // Run esbuild on the main thread
     let onmessage = WEB_WORKER_FUNCTION((data: Uint8Array) => worker.onmessage!({ data }))
+    let go: Go | undefined
     worker = {
       onmessage: null,
-      postMessage: data => setTimeout(() => onmessage({ data })),
+      postMessage: data => setTimeout(() => {
+        try {
+          go = onmessage({ data })
+        } catch (error) {
+          rejectAllWith(error) // Catch strange crashes (e.g. stack overflow)
+        }
+      }),
       terminate() {
+        if (go)
+          for (let timeout of go._scheduledTimeouts.values())
+            clearTimeout(timeout)
       },
     }
   }
@@ -121,9 +144,17 @@ const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembl
   // This will throw if WebAssembly module instantiation fails
   await firstMessagePromise
 
+  stopService = () => {
+    worker.terminate()
+    initializePromise = undefined
+    stopService = undefined
+    longLivedService = undefined
+  }
+
   longLivedService = {
     build: (options: types.BuildOptions) =>
-      new Promise<types.BuildResult>((resolve, reject) =>
+      new Promise<types.BuildResult>((resolve, reject) => {
+        rejectAllPromise.then(reject)
         service.buildOrContext({
           callName: 'build',
           refs: null,
@@ -131,10 +162,12 @@ const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembl
           isTTY: false,
           defaultWD: '/',
           callback: (err, res) => err ? reject(err) : resolve(res as types.BuildResult),
-        })),
+        })
+      }),
 
     context: (options: types.BuildOptions) =>
-      new Promise<types.BuildContext>((resolve, reject) =>
+      new Promise<types.BuildContext>((resolve, reject) => {
+        rejectAllPromise.then(reject)
         service.buildOrContext({
           callName: 'context',
           refs: null,
@@ -142,10 +175,12 @@ const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembl
           isTTY: false,
           defaultWD: '/',
           callback: (err, res) => err ? reject(err) : resolve(res as types.BuildContext),
-        })),
+        })
+      }),
 
     transform: (input: string | Uint8Array, options?: types.TransformOptions) =>
-      new Promise<types.TransformResult>((resolve, reject) =>
+      new Promise<types.TransformResult>((resolve, reject) => {
+        rejectAllPromise.then(reject)
         service.transform({
           callName: 'transform',
           refs: null,
@@ -157,27 +192,32 @@ const startRunningService = async (wasmURL: string | URL, wasmModule: WebAssembl
             writeFile(_, callback) { callback(null); },
           },
           callback: (err, res) => err ? reject(err) : resolve(res!),
-        })),
+        })
+      }),
 
     formatMessages: (messages, options) =>
-      new Promise((resolve, reject) =>
+      new Promise((resolve, reject) => {
+        rejectAllPromise.then(reject)
         service.formatMessages({
           callName: 'formatMessages',
           refs: null,
           messages,
           options,
           callback: (err, res) => err ? reject(err) : resolve(res!),
-        })),
+        })
+      }),
 
     analyzeMetafile: (metafile, options) =>
-      new Promise((resolve, reject) =>
+      new Promise((resolve, reject) => {
+        rejectAllPromise.then(reject)
         service.analyzeMetafile({
           callName: 'analyzeMetafile',
           refs: null,
           metafile: typeof metafile === 'string' ? metafile : JSON.stringify(metafile),
           options,
           callback: (err, res) => err ? reject(err) : resolve(res!),
-        })),
+        })
+      }),
   }
 }
 
